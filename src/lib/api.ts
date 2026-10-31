@@ -1,0 +1,233 @@
+import { invoke } from "@tauri-apps/api/core";
+
+export interface CreditExpiry {
+  at: number;
+  amount: number;
+}
+
+export interface AccountInfo {
+  id: string;
+  platform: string;
+  name: string;
+  email: string;
+  avatar: string;
+  token_expires_at: number;
+  refresh_token_expires_at: number;
+  last_checkin_time: number;
+  checkin_status: string;
+  fail_count: number;
+  cooldown_until: number;
+  created_at: number;
+  credits_balance: number | null;
+  credits_expiries: CreditExpiry[];
+  credits_fetched_at: number;
+}
+
+export interface CreditResult {
+  account_id: string;
+  account_name: string;
+  success: boolean;
+  balance: number | null;
+  expiries: CreditExpiry[];
+  message: string;
+}
+
+// 完整 Account（含凭据）：credits_expiries 后端存的是 JSON 字符串
+export interface Account extends Omit<AccountInfo, "credits_expiries"> {
+  access_token: string;
+  refresh_token: string;
+  cookies: string;
+  updated_at: number;
+  credits_expiries: string;
+}
+
+export interface AccountCredits {
+  account_id: string;
+  account_name: string;
+  platform: string;
+  balance: number;
+  fetched_at: number;
+  packages: CreditExpiry[];
+}
+
+export interface CheckinResult {
+  account_id: string;
+  account_name: string;
+  platform: string;
+  success: boolean;
+  /** 自动跳过（今日已签到 / 凭证已失效） */
+  skipped: boolean;
+  points: number;
+  message: string;
+}
+
+export interface CheckinRecord {
+  id: string;
+  account_id: string;
+  platform: string;
+  status: string;
+  points: number;
+  message: string;
+  created_at: number;
+}
+
+export interface PointsDashboard {
+  total_points: number;
+  today_new: number;
+  trend: { date: string; points: number }[];
+  expiring_packages: {
+    account_name: string;
+    platform: string;
+    points: number;
+    expires_at: number;
+    days_left: number;
+  }[];
+}
+
+export interface AppLog {
+  id: string;
+  level: string;
+  action: string;
+  message: string;
+  created_at: number;
+}
+
+export interface CheckinSettings {
+  enabled: boolean;
+  hour: number;
+  minute: number;
+  cooldown_minutes: number;
+  max_fail_count: number;
+  interval_seconds: number;
+}
+
+export const api = {
+  listAccounts: () => invoke<AccountInfo[]>("list_accounts"),
+  getAccountDetail: (id: string) => invoke<Account | null>("get_account_detail", { id }),
+  updateAccount: (p: {
+    id: string;
+    name: string;
+    email: string;
+    access_token: string;
+    refresh_token: string;
+    cookies: string;
+  }) => invoke<void>("update_account", p),
+  addAccountManual: (p: {
+    platform: string;
+    name: string;
+    email: string;
+    access_token: string;
+    refresh_token: string;
+    cookies: string;
+  }) => invoke<string>("add_account_manual", p),
+  addAccountImport: (json: string) => invoke<string>("add_account_import", { json }),
+  deleteAccount: (id: string) => invoke<void>("delete_account", { id }),
+  checkinOne: (id: string) => invoke<CheckinResult>("checkin_one", { id }),
+  checkinAll: (platform?: string) =>
+    invoke<CheckinResult[]>("checkin_all", { platform: platform ?? null }),
+  getCheckinRecords: (accountId?: string, limit = 50) =>
+    invoke<CheckinRecord[]>("get_checkin_records", { accountId, limit }),
+  getPointsDashboard: (platform: string) =>
+    invoke<PointsDashboard>("get_points_dashboard", { platform }),
+  getCheckinSettings: () => invoke<CheckinSettings>("get_checkin_settings"),
+  setCheckinSettings: (s: CheckinSettings) => invoke<void>("set_checkin_settings", { settings: s }),
+  getNotificationMode: () => invoke<string>("get_notification_mode"),
+  setNotificationMode: (mode: string) => invoke<void>("set_notification_mode", { mode }),
+  renewToken: (id: string) => invoke<string>("renew_token", { id }),
+  autoRenewAll: () => invoke<string[]>("auto_renew_all"),
+  generateQr: (text: string) => invoke<string>("generate_qr", { text }),
+  startTraeOauth: () => invoke<string>("start_trae_oauth"),
+  stopTraeOauth: () => invoke<void>("stop_trae_oauth"),
+  completeTraeOauth: (callbackUrl: string, name?: string) =>
+    invoke<string>("complete_trae_oauth", { callbackUrl, name: name ?? null }),
+  startWorkbuddyLogin: () =>
+    invoke<{ state: string; authUrl: string }>("start_workbuddy_login"),
+  pollWorkbuddyLogin: (loginState: string) =>
+    invoke<{ status: string; name: string }>("poll_workbuddy_login", { loginState }),
+  switchAccount: (id: string) => invoke<string>("switch_account", { id }),
+  switchWorkbuddyClient: (id: string) =>
+    invoke<string>("switch_workbuddy_client", { id }),
+  switchCodebuddyCnClient: (id: string) =>
+    invoke<string>("switch_codebuddy_cn_client", { id }),
+  switchTraeClient: (id: string) =>
+    invoke<string>("switch_trae_client", { id }),
+  traeClientRunning: () => invoke<boolean>("trae_client_running"),
+  backupTraeVault: (id: string) =>
+    invoke<string>("backup_trae_vault", { id }),
+  traeVaultInfo: (id: string) =>
+    invoke<[number, number] | null>("trae_vault_info", { id }),
+  refreshCredits: (id: string) => invoke<CreditResult>("refresh_credits", { id }),
+  refreshAllCredits: (platform?: string) =>
+    invoke<CreditResult[]>("refresh_all_credits", { platform: platform ?? null }),
+  getCreditPackages: (platform: string) =>
+    invoke<AccountCredits[]>("get_credit_packages", { platform }),
+  getLogs: (limit = 200) => invoke<AppLog[]>("get_logs", { limit }),
+  clearLogs: () => invoke<void>("clear_logs"),
+
+  // ===== 通用设置 =====
+  getAppSettings: () => invoke<AppSettings>("get_app_settings"),
+  setAppSettings: (settings: AppSettings) =>
+    invoke<void>("set_app_settings", { settings }),
+  detectClientPaths: () => invoke<ClientPaths>("detect_client_paths"),
+
+  // ===== Token 统计 =====
+  getTokenStatistics: (days?: number) =>
+    invoke<TokenStatistics>("get_token_statistics", days ? { days } : undefined),
+};
+
+export interface AppSettings {
+  log_retention_days: number;
+  minimize_to_tray_on_start: boolean;
+  /** 外观主题：light | dark | system */
+  theme: string;
+  client_path_trae: string;
+  client_path_workbuddy: string;
+  client_path_codebuddy_cn: string;
+}
+
+export interface ClientPaths {
+  trae: string;
+  workbuddy: string;
+  codebuddy_cn: string;
+}
+
+// ===== Token 统计 =====
+
+export interface TokenStatsTotals {
+  total: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  uncachedInput: number;
+  records: number;
+  cacheHitRate: number | null;
+}
+
+export interface TokenStatsGroup extends TokenStatsTotals {
+  key: string;
+  title?: string | null;
+  project?: string;
+  sessionId?: string;
+}
+
+export interface TokenStatsSource {
+  source: string;
+  summary: TokenStatsTotals;
+  models: TokenStatsGroup[];
+  projects: TokenStatsGroup[];
+  sessions: TokenStatsGroup[];
+  daily: TokenStatsGroup[];
+  dailyByModel: Record<string, TokenStatsGroup[]>;
+  hours: TokenStatsGroup[];
+  filesScanned: number;
+  parseErrors: number;
+  coverageStartAt: number | null;
+  coverageEndAt: number | null;
+}
+
+export interface TokenStatistics {
+  generatedAt: number;
+  rangeDays?: number | null;
+  sources: TokenStatsSource[];
+}

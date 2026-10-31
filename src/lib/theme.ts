@@ -1,6 +1,6 @@
 /**
  * 外观主题应用：light | dark | system
- * 通过在 <html> 上切换 .dark 类驱动 index.css 中的暗色变量；
+ * 通过在 <html> 上切换 data-theme 属性驱动 tokens.css 中的双主题变量；
  * system 模式监听系统配色变化实时同步。
  */
 
@@ -19,12 +19,17 @@ export function applyTheme(mode: string) {
 
   if (mode === "system") {
     mediaList = window.matchMedia("(prefers-color-scheme: dark)");
-    const sync = () => root.classList.toggle("dark", mediaList!.matches);
+    const sync = () => {
+      if (mediaList!.matches) root.dataset.theme = "dark";
+      else delete root.dataset.theme;
+    };
     sync();
     mediaHandler = sync;
     mediaList.addEventListener("change", mediaHandler);
+  } else if (mode === "dark") {
+    root.dataset.theme = "dark";
   } else {
-    root.classList.toggle("dark", mode === "dark");
+    delete root.dataset.theme;
   }
 }
 

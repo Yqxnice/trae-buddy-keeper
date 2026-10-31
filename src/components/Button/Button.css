@@ -1,0 +1,59 @@
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 8px;
+  border: 1px solid var(--rule-strong);
+  background: var(--surface);
+  color: var(--ink);
+  font: 500 12.5px/1 var(--sans);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+.btn:hover {
+  background: var(--surface2);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn.pri {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+  font-weight: 600;
+}
+html[data-theme="dark"] .btn.pri {
+  color: #0a140d;
+}
+.btn.pri:hover {
+  background: color-mix(in srgb, var(--brand) 88%, #000);
+}
+.btn.ghost {
+  background: transparent;
+}
+.btn.ghost:hover {
+  background: var(--surface2);
+}
+.btn.danger {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--bad) 55%, transparent);
+  color: var(--bad);
+}
+.btn.danger:hover {
+  background: color-mix(in srgb, var(--bad) 12%, transparent);
+}
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+/* 按钮内小图标统一尺寸 */
+.btn svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}

@@ -1,0 +1,13 @@
+.cfrm-msg {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: pre-line;
+  user-select: text;
+}
+.cfrm-acts {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 14px;
+}

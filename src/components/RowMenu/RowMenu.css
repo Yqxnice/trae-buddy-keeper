@@ -1,0 +1,58 @@
+/* 行内溢出菜单：触发钮复用 .ract 语感，浮层为瞬时表面（描边 + 阴影） */
+.rmenu {
+  position: relative;
+  flex: none;
+}
+.rmenu-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 6px;
+}
+.rmenu-trigger.on {
+  background: var(--surface2);
+  color: var(--ink);
+}
+.rmenu-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  min-width: 150px;
+  background: var(--surface);
+  border: 1px solid var(--rule-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+}
+.rmenu-item {
+  border: 0;
+  background: transparent;
+  text-align: left;
+  color: var(--ink);
+  font: 500 12.5px/1 var(--sans);
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.rmenu-item:hover:not(:disabled) {
+  background: var(--surface2);
+}
+.rmenu-item.danger {
+  color: var(--bad);
+}
+.rmenu-item.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--bad) 12%, transparent);
+}
+.rmenu-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.rmenu-sep {
+  height: 1px;
+  background: var(--rule);
+  margin: 4px 6px;
+}

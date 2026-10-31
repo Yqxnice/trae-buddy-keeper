@@ -21,6 +21,8 @@ export interface AccountInfo {
   credits_balance: number | null;
   credits_expiries: CreditExpiry[];
   credits_fetched_at: number;
+  /** 当前账户已注入的客户端（trae / workbuddy / codebuddy_cn） */
+  clients?: string[];
 }
 
 export interface CreditResult {

@@ -1,0 +1,24 @@
+.meter {
+  flex: 1;
+  max-width: 180px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--surface2);
+  overflow: hidden;
+}
+.meter.sm {
+  max-width: none;
+  height: 4px;
+}
+.meter i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--brand);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .meter i {
+    transform-origin: left;
+    animation: grow 0.5s cubic-bezier(0.22, 0.61, 0.36, 1) backwards;
+  }
+}

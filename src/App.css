@@ -1,0 +1,81 @@
+/* 应用外壳：标题栏 + 状态脊柱 + 主内容 */
+.app-shell {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--mica);
+}
+
+.app-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* 标题栏：产品切换用下划线 SelectorBar，右缘原生窗口控制 */
+.titlebar {
+  height: 42px;
+  flex: none;
+  position: relative;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--rule);
+  padding-left: 16px;
+}
+.tb-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13px;
+  font-weight: 650;
+}
+.tb-mark {
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+  background: var(--brand);
+  position: relative;
+  flex: none;
+}
+.tb-mark::after {
+  content: "";
+  position: absolute;
+  inset: 5px;
+  border-radius: 2px;
+  background: var(--mica);
+  opacity: 0.92;
+}
+.tb-ctl {
+  margin-left: auto;
+  display: flex;
+  height: 100%;
+}
+.tb-ctl button {
+  width: 46px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.tb-ctl button:hover {
+  background: var(--surface2);
+  color: var(--ink);
+}
+.tb-ctl button.close:hover {
+  background: var(--bad);
+  color: #fff;
+}
+
+/* 主内容区 */
+.main {
+  flex: 1;
+  min-width: 0;
+  padding: 20px 24px 28px;
+}
+.view-page[hidden] {
+  display: none;
+}

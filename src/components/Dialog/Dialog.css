@@ -1,0 +1,111 @@
+.dlg-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: color-mix(in srgb, var(--stage) 55%, transparent);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.dlg {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--rule-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  max-height: calc(100vh - 60px);
+  display: flex;
+  flex-direction: column;
+}
+.dlg-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px 0;
+}
+.dlg-title {
+  font-size: 14.5px;
+  font-weight: 650;
+}
+.dlg-desc {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 3px;
+}
+.dlg-x {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex: none;
+  transition: background 0.12s, color 0.12s;
+}
+.dlg-x:hover {
+  background: var(--surface2);
+  color: var(--ink);
+}
+.dlg-body {
+  padding: 14px 18px 18px;
+  overflow-y: auto;
+  min-height: 0;
+}
+/* 滚动条样式由 base.css 全局提供 */
+
+/* 弹窗内表单行 */
+.fld {
+  margin-bottom: 12px;
+}
+.fld:last-child {
+  margin-bottom: 0;
+}
+.fld label {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 600;
+  margin-bottom: 5px;
+}
+.fld .inp:not(.area) {
+  width: 100%;
+}
+.hint {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+/* 弹窗底部操作行 */
+.dlg-acts {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 6px;
+}
+.dlg-acts .btn {
+  flex: 1;
+}
+
+/* 通用满宽 */
+.w-full {
+  width: 100%;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .dlg {
+    animation: dlgin 0.18s cubic-bezier(0.2, 0.7, 0.3, 1);
+  }
+  @keyframes dlgin {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.985);
+    }
+  }
+}

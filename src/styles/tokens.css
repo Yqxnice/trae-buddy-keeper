@@ -1,0 +1,55 @@
+/*
+ * 设计令牌 —— 唯一真相来源为 design-preview.html
+ * 浅色为默认，深色由 html[data-theme="dark"] 驱动（theme.ts 切换）
+ */
+:root {
+  /* 色阶：舞台(窗口底) / Mica(壳层) / 表面(卡片) / 次表面(嵌入块) */
+  --stage: #e7eae3;
+  --mica: #eff1eb;
+  --surface: #fafbf9;
+  --surface2: #e9ede6;
+
+  /* 文字 */
+  --ink: #1a1e1a;
+  --muted: #5d655d;
+
+  /* 分隔线 */
+  --rule: rgba(26, 30, 26, 0.12);
+  --rule-strong: rgba(26, 30, 26, 0.22);
+
+  /* 品牌（绿）与语义色 */
+  --brand: #05994f;
+  --brand-ink: #036b38;
+  --brand-soft: #dff3e7;
+  --ok: #0e9f5a;
+  --warn: #c98a00;
+  --bad: #d9483c;
+
+  --shadow: 0 24px 60px rgba(20, 30, 22, 0.16), 0 2px 8px rgba(20, 30, 22, 0.08);
+
+  /* 字体：Segoe UI Variable 栈 + 等宽 Cascadia 栈 */
+  --sans: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+}
+
+html[data-theme="dark"] {
+  --stage: #0f120f;
+  --mica: #181c19;
+  --surface: #1f231f;
+  --surface2: #282d28;
+
+  --ink: #e4e8e2;
+  --muted: #9aa39a;
+
+  --rule: rgba(228, 232, 226, 0.12);
+  --rule-strong: rgba(228, 232, 226, 0.24);
+
+  --brand: #2fd77e;
+  --brand-ink: #b9f1d3;
+  --brand-soft: #0d3b24;
+  --ok: #2fbf74;
+  --warn: #e5a50f;
+  --bad: #f0705f;
+
+  --shadow: 0 24px 60px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.4);
+}

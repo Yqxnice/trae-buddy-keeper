@@ -1,0 +1,71 @@
+.checkin {
+  max-width: 900px;
+}
+.checkin-empty {
+  border: 1px dashed var(--rule-strong);
+  border-radius: 9px;
+  padding: 40px 0;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+/* 跳过策略复选框 */
+.chk {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.chk input {
+  accent-color: var(--brand);
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+.chk-count {
+  font-size: 12px;
+  color: var(--muted);
+}
+.chk-box {
+  accent-color: var(--brand);
+  width: 14px;
+  height: 14px;
+  flex: none;
+  cursor: pointer;
+}
+
+/* 签到结果行（log-row 变体） */
+.log-row.off {
+  opacity: 0.5;
+}
+.ck-id {
+  min-width: 0;
+}
+.ck-id .log-note.mono {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.ck-cred {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ck-points {
+  flex: none;
+  min-width: 72px;
+}
+.log-row .chip {
+  margin-left: 0;
+  max-width: 46%;
+  overflow: hidden;
+}
+.log-row .chip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

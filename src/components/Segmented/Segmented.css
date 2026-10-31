@@ -1,0 +1,23 @@
+.seg2 {
+  display: flex;
+  border: 1px solid var(--rule-strong);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.seg2 button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: 500 12.5px/1 var(--sans);
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.seg2 button:hover:not(.on) {
+  color: var(--ink);
+}
+.seg2 button.on {
+  background: var(--surface2);
+  color: var(--ink);
+  font-weight: 600;
+}

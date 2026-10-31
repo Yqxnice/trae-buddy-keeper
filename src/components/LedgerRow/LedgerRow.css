@@ -1,0 +1,119 @@
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 9px;
+  padding: 10px 14px;
+  transition: border-color 0.15s;
+}
+.row:hover {
+  border-color: var(--rule-strong);
+}
+.rname {
+  font-size: 13.5px;
+  font-weight: 600;
+  flex: none;
+}
+.rdev {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  flex: none;
+}
+.rgrow {
+  flex: 1;
+  min-width: 120px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.rval {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 行内小操作按钮 */
+.racts {
+  display: flex;
+  gap: 2px;
+  flex: none;
+}
+.ract {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: 500 12px/1 var(--sans);
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.ract:hover:not(:disabled) {
+  background: var(--surface2);
+  color: var(--ink);
+}
+.ract.pri {
+  color: var(--brand-ink);
+  font-weight: 600;
+}
+.ract.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--bad) 12%, transparent);
+  color: var(--bad);
+}
+.ract:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 双行卡片变体：首行身份堆叠+状态章+数值列+操作，次行备注与名称对齐 */
+.row-stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 7px;
+  padding: 11px 14px 10px;
+}
+.row-stacked .rowline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.row-stacked .rid {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.row-stacked .rid .rname {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row-stacked .rid .rdev {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row-stacked .rchip {
+  flex: none;
+}
+.row-stacked .raside {
+  margin-left: auto;
+  flex: none;
+  min-width: 0;
+}
+.row-stacked .racts {
+  margin-left: auto; /* 操作区钉在右缘（aside 移除后由它接管推挤） */
+  flex: none;
+}
+.row-stacked .rsub {
+  padding-left: 42px; /* 头像 30 + 间距 12，与名称对齐 */
+  min-width: 0;
+}

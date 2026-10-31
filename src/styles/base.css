@@ -1,0 +1,248 @@
+/*
+ * 基础样式与全局动效 —— 自 design-preview.html 1:1 迁移
+ * 包含：reset / 应用外壳底色 / 滚动条 / 布局原语(.tools .spacer .gtitle) / 静默条 / keyframes
+ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* 全局色彩过渡：主题切换与状态变化的柔和跟随 */
+*,
+*::before,
+*::after {
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--stage);
+  color: var(--ink);
+  font: 400 13px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  user-select: none;
+}
+
+button {
+  font-family: var(--sans);
+}
+
+/* 全局滚动条：细圆轨道（主内容 / 弹窗 / 菜单 / 文本域统一生效） */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted) 30%, transparent);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--muted) 50%, transparent);
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+.scroll-area {
+  overflow-y: auto;
+}
+
+/* ============ 布局原语（多页复用的工具行） ============ */
+.tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.spacer {
+  flex: 1;
+}
+
+/* 账本行 / 结果行容器：纵向 8px 间距 */
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 数字参数行（时:分 / 天数等） */
+.numrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+/* 分组小标题（设置 / 定时任务等页面） */
+.gtitle {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  margin: 16px 0 8px 2px;
+}
+.gtitle.first {
+  margin-top: 0;
+}
+
+/* 静默信息条：虚线框说明文字 */
+.quiet {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 10px 14px;
+  border: 1px dashed var(--rule-strong);
+  border-radius: 9px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.quiet svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+/* 结果行：时间 + 名称 + 说明 + 右缘状态章（签到 / 概览复用） */
+.log-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 9px;
+  padding: 10px 14px;
+}
+.log-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+.log-note {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 日志列表：行式流水（系统日志 / Token 会话排行共用） */
+.loglist {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.log-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  font-size: 12.5px;
+  min-width: 0;
+}
+.log-line + .log-line {
+  border-top: 1px solid var(--rule);
+}
+.log-time {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  flex: none;
+}
+.lv {
+  flex: none;
+  width: 42px;
+  text-align: center;
+  border-radius: 6px;
+  padding: 2px 0;
+  font-size: 11px;
+  font-weight: 650;
+}
+.lv-info {
+  background: var(--surface2);
+  color: var(--muted);
+}
+.lv-ok {
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+  color: var(--ok);
+}
+.lv-warn {
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  color: var(--warn);
+}
+.lv-err {
+  background: color-mix(in srgb, var(--bad) 14%, transparent);
+  color: var(--bad);
+}
+.cat {
+  flex: none;
+  border: 1px solid var(--rule-strong);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.log-msg {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+  word-break: break-all;
+  user-select: text;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .loglist .log-line {
+    animation: rowin 0.25s ease-out backwards;
+  }
+}
+
+/* ============ 动效 ============ */
+@keyframes viewin {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+@keyframes grow {
+  from {
+    transform: scaleX(0);
+  }
+}
+@keyframes rowin {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 旋转指示（加载中图标统一走这里） */
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+/* 页面级加载态 */
+.page-loading {
+  height: 100%;
+  min-height: 240px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .anim-viewin {
+    animation: viewin 0.2s cubic-bezier(0.2, 0.7, 0.3, 1);
+  }
+}

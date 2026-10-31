@@ -1,0 +1,11 @@
+.logs {
+  max-width: 980px;
+}
+.logs-empty {
+  border: 1px dashed var(--rule-strong);
+  border-radius: 9px;
+  padding: 48px 0;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12.5px;
+}

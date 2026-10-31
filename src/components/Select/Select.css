@@ -1,0 +1,37 @@
+.selwrap {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+.selwrap::after {
+  content: "";
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
+}
+.sel {
+  appearance: none;
+  -webkit-appearance: none;
+  height: 32px;
+  padding: 0 32px 0 12px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font: 500 12.5px/1 var(--sans);
+  cursor: pointer;
+  outline: none;
+}
+.sel:focus {
+  border-color: var(--brand);
+}
+.sel option {
+  background: var(--surface);
+  color: var(--ink);
+}

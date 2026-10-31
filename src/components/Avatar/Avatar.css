@@ -1,0 +1,24 @@
+.ava {
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--brand-soft);
+  color: var(--brand-ink);
+  font-size: 12.5px;
+  font-weight: 650;
+  overflow: hidden;
+}
+.ava.sm {
+  width: 24px;
+  height: 24px;
+  font-size: 11px;
+}
+.ava img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}

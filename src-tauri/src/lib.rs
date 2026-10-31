@@ -170,7 +170,22 @@ pub fn run() {
 #[tauri::command]
 fn list_accounts(state: State<AppState>) -> Result<Vec<AccountInfo>, String> {
     let accounts = state.db.list_accounts().map_err(|e| e.to_string())?;
-    Ok(accounts.into_iter().map(AccountInfo::from).collect())
+    let mut infos: Vec<AccountInfo> = accounts.into_iter().map(AccountInfo::from).collect();
+    // 每个客户端当前注入的账户 id → 前端在卡片头像上渲染客户端品牌角标
+    for (key, client) in [
+        ("active_client_trae", "trae"),
+        ("active_client_workbuddy", "workbuddy"),
+        ("active_client_codebuddy_cn", "codebuddy_cn"),
+    ] {
+        if let Ok(Some(id)) = state.db.get_setting(key) {
+            for info in infos.iter_mut() {
+                if info.id == id {
+                    info.clients.push(client.to_string());
+                }
+            }
+        }
+    }
+    Ok(infos)
 }
 
 #[tauri::command]
@@ -686,6 +701,7 @@ async fn switch_workbuddy_client(state: State<'_, AppState>, id: String) -> Resu
             db.log("success", "切换", &format!("WorkBuddy 客户端已切换到「{name}」"));
             // 与活跃账户高亮语义保持一致
             let _ = db.set_setting("active_account", &id);
+            let _ = db.set_setting("active_client_workbuddy", &id);
             Ok(msg.clone())
         }
         Err(e) => {
@@ -730,6 +746,7 @@ async fn switch_codebuddy_cn_client(state: State<'_, AppState>, id: String) -> R
     match &result {
         Ok(msg) => {
             db.log("success", "切换", &format!("CodeBuddy CN 已切换到「{name}」"));
+            let _ = db.set_setting("active_client_codebuddy_cn", &id);
             Ok(msg.clone())
         }
         Err(e) => {
@@ -837,6 +854,7 @@ async fn switch_trae_client(state: State<'_, AppState>, id: String) -> Result<St
         Ok(msg) => {
             db.log("success", "切换", &format!("Trae 客户端已切换到「{name}」"));
             let _ = db.set_setting("active_account", &id);
+            let _ = db.set_setting("active_client_trae", &id);
             Ok(msg.clone())
         }
         Err(e) => {

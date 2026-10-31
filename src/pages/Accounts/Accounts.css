@@ -1,0 +1,122 @@
+.accs {
+  max-width: 1040px;
+}
+.accs-empty,
+.accs .dash-empty {
+  border: 1px dashed var(--rule-strong);
+  border-radius: 9px;
+  padding: 40px 0;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+/* 首行客户端切换器（SelectorBar 语言，当前注入的客户端高亮） */
+.accs-clients {
+  display: flex;
+  gap: 4px;
+  flex: none;
+}
+.accs-client {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  padding: 3px 8px 3px 5px;
+  color: var(--muted);
+  font: 500 11.5px/1.2 var(--sans);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.accs-client img {
+  display: block;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  filter: grayscale(1);
+  opacity: 0.55;
+  transition: filter 0.12s, opacity 0.12s;
+}
+.accs-client:hover:not(:disabled) {
+  background: var(--surface2);
+  color: var(--ink);
+}
+.accs-client:hover:not(:disabled) img {
+  filter: none;
+  opacity: 1;
+}
+/* 当前注入的客户端：品牌底色 + 全彩图标 */
+.accs-client.on {
+  background: var(--brand-soft);
+  color: var(--brand-ink);
+  font-weight: 600;
+}
+.accs-client.on img {
+  filter: none;
+  opacity: 1;
+}
+.accs-client:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+/* 次行：备注 + 积分（右对齐，与备注同线） */
+.accs-sub {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+}
+/* 积分：行内数值 + 最近到期说明 */
+.accs-credit {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: none;
+  white-space: nowrap;
+}
+.accs-credit-val {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+}
+.accs-credit-val i {
+  font-style: normal;
+  font-family: var(--sans);
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--muted);
+  margin-left: 4px;
+}
+.accs-credit-sub {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.accs-note {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 弹窗内标签页面板 */
+.accs-tabpane {
+  margin-top: 14px;
+}
+.accs-waiting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-bottom: 12px;
+}

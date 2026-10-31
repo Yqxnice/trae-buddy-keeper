@@ -1,0 +1,107 @@
+.rail {
+  width: 212px;
+  flex: none;
+  border-right: 1px solid var(--rule);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 10px;
+}
+.rail-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.rail-foot {
+  margin-top: auto;
+  border-top: 1px solid var(--rule);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-i {
+  position: relative;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 36px;
+  padding: 0 10px 0 14px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font: 500 13px/1 var(--sans);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s, color 0.12s;
+}
+.nav-i svg {
+  flex: none;
+}
+.nav-i:hover {
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+  color: var(--ink);
+}
+.nav-i.on {
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+
+/* 实时状态微点：仅异常/待办时出现，呼吸强化「切页前先知情」 */
+.ndot {
+  position: relative;
+  margin-left: auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  flex: none;
+}
+.ndot.warn {
+  background: var(--warn);
+}
+.ndot.brand {
+  background: var(--brand);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ndot::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 999px;
+    background: inherit;
+    opacity: 0.45;
+    animation: nd 1.6s ease-out infinite;
+  }
+  @keyframes nd {
+    to {
+      transform: scale(2.6);
+      opacity: 0;
+    }
+  }
+}
+
+@media (max-width: 880px) {
+  .rail {
+    width: 60px;
+    padding: 12px 8px;
+  }
+  .nlabel {
+    display: none;
+  }
+  .nav-i {
+    justify-content: center;
+    padding: 0;
+    gap: 0;
+  }
+  .ndot {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    margin: 0;
+  }
+}

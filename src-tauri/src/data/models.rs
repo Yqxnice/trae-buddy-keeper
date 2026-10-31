@@ -125,6 +125,9 @@ pub struct AccountInfo {
     pub credits_expiries: Vec<CreditExpiry>,
     pub credits_fetched_at: i64,
     pub account_type: String,
+    /// 当前账户已注入的客户端（trae / workbuddy / codebuddy_cn），由 list_accounts 依据 active_client_* 设置填充
+    #[serde(default)]
+    pub clients: Vec<String>,
 }
 
 impl From<Account> for AccountInfo {
@@ -148,6 +151,7 @@ impl From<Account> for AccountInfo {
             credits_expiries: expiries,
             credits_fetched_at: a.credits_fetched_at,
             account_type: a.account_type,
+            clients: Vec::new(),
         }
     }
 }

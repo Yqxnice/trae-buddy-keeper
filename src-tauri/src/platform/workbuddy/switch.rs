@@ -1,6 +1,7 @@
 //! WorkBuddy 客户端账号切换：备份 → 关进程 → 写认证文件 → 删退出标记 → 启动。
 //!
-//! 方案对齐 workbuddy-switch（auth_file.rs / switch.rs）：
+//! 实现参考了开源项目 workbuddy-switch、TraeTools。
+//!
 //! 官方登录态集中在单个 JSON 认证文件（四段：account/auth/accounts/allAccounts），
 //! 切换 = 原子写入目标账号凭据 + 写后校验 + 清理 `<file>.logged-out` 退出标记
 //! （标记存在时官方 App 一律视为未登录）。写入失败自动从备份还原，不带病启动。
@@ -16,11 +17,11 @@ const AUTH_FILE_NAME: &str = "workbuddy-desktop.info";
 const DOMAIN: &str = "www.codebuddy.cn";
 /// Windows 进程镜像名
 const PROCESS_IMAGE: &str = "WorkBuddy.exe";
-/// 关闭进程总预算：先优雅 12s，再强杀 8s（对齐 TraeTools 三级关闭口径）
+/// 关闭进程总预算：先优雅 12s，再强杀 8s（对齐参考实现的三级关闭口径）
 const GRACEFUL_WAIT_SECS: u64 = 12;
 const FORCE_WAIT_SECS: u64 = 8;
 
-/// 官方认证文件路径（三平台口径与 workbuddy-switch 一致）
+/// 官方认证文件路径（三平台口径与参考实现一致）
 pub fn auth_file_path() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or("无法定位用户主目录")?;
     #[cfg(target_os = "windows")]
@@ -52,7 +53,7 @@ fn backup_auth_file(auth_path: &Path) -> Option<PathBuf> {
     Some(dest)
 }
 
-/// 从账号构造官方 account 字段（缺省值与 workbuddy-switch build_account_obj 对齐）
+/// 从账号构造官方 account 字段（缺省值与参考实现对齐）
 fn build_account_obj(acc: &Account) -> Value {
     let mut obj = Map::new();
     obj.insert("uid".to_string(), json!(acc.uid));

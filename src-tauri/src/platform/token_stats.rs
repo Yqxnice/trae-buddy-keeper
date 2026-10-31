@@ -1,8 +1,9 @@
 //! 本地 WorkBuddy / WorkBuddy 国际版 / CodeBuddy IDE Token 统计。
 //!
-//! 设计参考 workbuddy-switch 的 token_stats 模块：日志只在这里解码、去重和按时间
-//! 聚合，Tauri 层只负责转发结果。响应只包含聚合数字和脱敏标识，不返回消息正文、
-//! arguments 或认证信息。
+//! 实现参考了开源项目 workbuddy-switch。
+//!
+//! 日志只在这里解码、去重和按时间聚合，Tauri 层只负责转发结果。响应只包含聚合数字
+//! 和脱敏标识，不返回消息正文、arguments 或认证信息。
 //!
 //! CodeBuddy IDE 不写 JSONL，用量在 `CodeBuddyExtension/Data/**/history/**/index.json`
 //! 的 `requests[].usage` 中；消息正文文件（`messages/`）不会被扫描。
@@ -628,7 +629,7 @@ fn decode_genie_workspace(name: &str) -> Option<String> {
 /// 从 CodeBuddy CN 的 genie-history 建立 session_id -> project 映射。
 fn ide_project_by_session() -> HashMap<String, String> {
     let mut map = HashMap::new();
-    let Some(root) = crate::platform::codebuddy_cn::data_dir().map(|dir| {
+    let Some(root) = crate::platform::workbuddy::codebuddy_cn::data_dir().map(|dir| {
         dir.join("User")
             .join("globalStorage")
             .join("tencent-cloud.coding-copilot")

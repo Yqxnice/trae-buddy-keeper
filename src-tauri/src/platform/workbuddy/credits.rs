@@ -1,6 +1,8 @@
 //! WorkBuddy 真实积分查询：直连腾讯 billing「用户资源包」接口。
 //!
-//! 口径对齐 workbuddy-manager（server/services/tencent.py fetch_credits）：
+//! 实现参考了开源项目 workbuddy-manager、workbuddy-switch。
+//!
+//! 口径：
 //! - 国内版路径固定 `/v2/billing/meter/get-user-resource`，ProductCode=p_tcaca，
 //!   Status=[0,3]，到期时间窗为「本机此刻 ~ +101 年」的粗过滤；
 //! - 单套餐剩余：CycleCapacitySize>0 时只看 Cycle 三字段（remain 钳进 [0,size]，
@@ -18,7 +20,7 @@ use crate::data::models::{Account, CreditExpiry, CreditResult};
 use crate::platform::workbuddy::api::cookie_header;
 
 const WB_BASE: &str = "https://www.codebuddy.cn";
-/// 企业配额接口（对齐 workbuddy-switch issue #167）：企业账号不走个人版资源接口
+/// 企业配额接口（参考实现同口径）：企业账号不走个人版资源接口
 const ENTERPRISE_USAGE_PATH: &str = "/v2/billing/meter/get-enterprise-user-usage";
 /// 企业 ID 补拉接口：type 兜底判定为企业版但账号缺 ID 时使用（单次尝试）
 const ENTERPRISE_ACCOUNTS_PATH: &str = "/console/accounts";

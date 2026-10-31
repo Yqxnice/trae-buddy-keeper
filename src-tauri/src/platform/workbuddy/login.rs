@@ -1,11 +1,12 @@
 //! WorkBuddy 登录：腾讯插件授权协议（state 轮询模式）。
 //!
+//! 实现参考了开源项目 workbuddy-manager、workbuddy-switch。
+//!
 //! 流程：`POST /v2/plugin/auth/state` 获取 state 与授权链接 → 呼出系统浏览器打开
 //! 授权页（扫码或账号登录）→ 前端轮询 `poll_workbuddy_login` →
 //! `GET /v2/plugin/auth/token?state=` 返回 accessToken/refreshToken →
 //! 再查 `GET /v2/plugin/login/account?state=` 取昵称入库。
-//! 协议细节对齐 workbuddy-manager 项目（server/services/tencent.py）：
-//! 统一信封 {code, msg, data}，code != 0 即业务未完成（含等待登录）。
+//! 协议细节：统一信封 {code, msg, data}，code != 0 即业务未完成（含等待登录）。
 
 use chrono::Utc;
 use serde::Serialize;
@@ -16,7 +17,7 @@ use uuid::Uuid;
 use crate::data::models::{Account, CheckinStatus};
 use crate::AppState;
 
-/// 登录接口基址（国内版；与 workbuddy-switch 同口径，platform=workbuddy 换取桌面端会话 token，
+/// 登录接口基址（国内版；platform=workbuddy 换取桌面端会话 token，
 /// 用 platform=CLI 拿到的 token 只能调 billing/签到接口，写进桌面客户端会被拒登）
 const CHAT_BASE: &str = "https://www.codebuddy.cn";
 const UA: &str = "CLI/2.63.2 CodeBuddy/2.63.2";

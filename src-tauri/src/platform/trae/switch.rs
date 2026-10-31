@@ -1,7 +1,9 @@
-//! Trae CN 客户端账号切换：整目录快照「冷切换」（方案对齐 TraeTools）。
+//! Trae CN 客户端账号切换：整目录快照「冷切换」。
+//!
+//! 实现参考了开源项目 TraeTools。
 //!
 //! 与 WorkBuddy 的单认证文件不同，Trae 登录态散落在 vscdb/storage.json/Cookie 等多处，
-//! 只能按固定白名单整体备份/还原。已吸收 TraeTools 实测的三个坑：
+//! 只能按固定白名单整体备份/还原。已吸收参考项目实测的三个坑：
 //! 1) 恢复前必须删 `code.lock` 与 `state.vscdb-wal/-shm`——否则客户端启动回放旧账号 WAL；
 //! 2) 守护判定只看 storage.json 的 `iCubeAuthInfo://usertag` + `iCubeAuthInfo://icube.cloudide`
 //!    凭据键：被客户端清除 = 明确失败（回滚），全程齐全 = 进入；
@@ -36,7 +38,7 @@ const WHITELIST: [&str; 15] = [
     "Session Storage",
 ];
 
-/// 与登录态无关的缓存/日志目录（对齐 TraeTools DefaultExcludeDirs）
+/// 与登录态无关的缓存/日志目录（对齐参考实现的默认排除清单）
 const EXCLUDE_DIRS: [&str; 16] = [
     "Cache", "CachedData", "CachedConfigurations", "CachedProfilesData",
     "Code Cache", "GPUCache", "Crashpad", "DawnGraphiteCache", "DawnWebGPUCache",

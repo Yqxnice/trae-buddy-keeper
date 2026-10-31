@@ -106,7 +106,7 @@ pub async fn refresh_access_token(acc: &Account) -> Result<(String, String, i64)
     }
     let client = Client::new();
     // 与登录同 host（www.codebuddy.cn）：platform=workbuddy 的 token 用 copilot.tencent.com
-    // 刷新可能拿不到同档位会话，对齐 workbuddy-switch 的 refresh_url 口径
+    // 刷新可能拿不到同档位会话，刷新端点与登录接口保持同口径
     let resp = client
         .post("https://www.codebuddy.cn/v2/plugin/auth/token/refresh")
         .header("Accept", "application/json, text/plain, */*")

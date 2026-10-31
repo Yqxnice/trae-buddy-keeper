@@ -1,5 +1,7 @@
 //! CodeBuddy CN（IDE）账号切换。
 //!
+//! 实现参考了开源项目 workbuddy-switch。
+//!
 //! 机制与 WorkBuddy 桌面端完全不同：CodeBuddy CN 是 VS Code 系 IDE，登录态保存在
 //! `%APPDATA%\CodeBuddy CN\User\globalStorage\state.vscdb` 的 Safe Storage secret 行
 //! （Chromium/Electron Safe Storage），而不是独立认证文件。
@@ -8,8 +10,6 @@
 //! Windows 加密：`Local State` 的 `os_crypt.encrypted_key`（base64，去 "DPAPI" 前缀）
 //! 经 DPAPI 解出 32 字节 AES key，AES-256-GCM 加密，密文格式 `v10` + 12 字节 nonce + 密文；
 //! 落库值为文本 `{"type":"Buffer","data":[...]}`。
-//!
-//! 实现口径对齐 workbuddy-switch 的 vscode_cn_inject.rs / codebuddy_cn_ide.rs。
 
 use std::path::{Path, PathBuf};
 
@@ -147,7 +147,7 @@ fn encrypt_v10(_key: &[u8], _plaintext: &[u8]) -> Result<Vec<u8>, String> {
     Err("当前仅支持 Windows 注入 CodeBuddy CN".to_string())
 }
 
-// ---------- 会话 JSON（对齐参考项目 build_session_json） ----------
+// ---------- 会话 JSON（对齐参考实现） ----------
 
 /// 复合 token：`<uid>+<access_token>`；无 uid 时退化为裸 token
 fn format_token(acc: &Account) -> String {
@@ -238,7 +238,7 @@ fn inject_session(plaintext: &str) -> Result<PathBuf, String> {
     Ok(db_path)
 }
 
-// ---------- 进程控制（对齐 platform/workbuddy/switch.rs 的方式） ----------
+// ---------- 进程控制（对齐同目录 switch.rs 的方式） ----------
 
 #[cfg(target_os = "windows")]
 fn client_running() -> bool {

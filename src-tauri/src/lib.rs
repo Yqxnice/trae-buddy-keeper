@@ -1,3 +1,5 @@
+//! 实现参考了开源项目 workbuddy-switch、workbuddy-manager、TraeTools。
+
 use std::sync::Arc;
 
 use chrono::{Local, Utc};
@@ -283,7 +285,7 @@ fn add_account_import(state: State<AppState>, json: String) -> Result<String, St
             .and_then(|d| d.as_str())
             .unwrap_or("")
             .to_string();
-        // 兼容从 workbuddy-switch 等工具导出的企业账号字段
+        // 兼容从外部工具导出的企业账号字段
         let enterprise_id = item
             .get("enterprise_id")
             .or_else(|| item.get("enterpriseId"))
@@ -645,7 +647,7 @@ fn switch_account(state: State<AppState>, id: String) -> Result<String, String> 
     Ok(format!("已切换到账户 {}", id))
 }
 
-/// WorkBuddy 客户端真实切换：写官方认证文件并重启客户端（对齐 workbuddy-switch 方案）
+/// WorkBuddy 客户端真实切换：写官方认证文件并重启客户端（对齐参考实现方案）
 #[tauri::command]
 async fn switch_workbuddy_client(state: State<'_, AppState>, id: String) -> Result<String, String> {
     let acc = state
@@ -721,7 +723,7 @@ async fn switch_codebuddy_cn_client(state: State<'_, AppState>, id: String) -> R
     let db = state.db.clone();
     let name = acc.name.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        crate::platform::codebuddy_cn::switch_to_client(&acc, &exe)
+        crate::platform::workbuddy::codebuddy_cn::switch_to_client(&acc, &exe)
     })
     .await
     .map_err(|e| format!("切换任务执行失败: {e}"))?;
@@ -797,7 +799,7 @@ fn trae_client_running(state: State<AppState>) -> bool {
     crate::platform::trae::switch::is_running_for_exe(&exe)
 }
 
-/// Trae 客户端真实切换：整目录快照冷切换（对齐 TraeTools 方案，含守护与回滚）
+/// Trae 客户端真实切换：整目录快照冷切换（对齐参考实现方案，含守护与回滚）
 #[tauri::command]
 async fn switch_trae_client(state: State<'_, AppState>, id: String) -> Result<String, String> {
     let acc = state

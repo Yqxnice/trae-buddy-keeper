@@ -11,6 +11,7 @@ import {
   CalendarCheck,
   BarChart3,
   Clock,
+  BookOpen,
   ScrollText,
 } from "lucide-react";
 import { Dashboard } from "@/pages/Dashboard/Dashboard";
@@ -20,6 +21,7 @@ import { CheckinPage } from "@/pages/Checkin/Checkin";
 import { TokenStatsPage } from "@/pages/TokenStats/TokenStats";
 import { LogsPage } from "@/pages/Logs/Logs";
 import { SchedulerPage } from "@/pages/Scheduler/Scheduler";
+import { ManualPage } from "@/pages/Manual/Manual";
 import { SettingsPage } from "@/pages/Settings/Settings";
 import { ToastContainer } from "@/components/Toast/Toast";
 import { ConfirmHost } from "@/components/ConfirmDialog/ConfirmDialog";
@@ -42,6 +44,7 @@ type Tab =
   | "checkin"
   | "token-stats"
   | "scheduler"
+  | "manual"
   | "logs"
   | "settings";
 
@@ -251,6 +254,7 @@ export default function App() {
 
   const footItems: NavItem[] = [
     { id: "scheduler", label: "定时任务", icon: Clock },
+    { id: "manual", label: "使用手册", icon: BookOpen },
     { id: "logs", label: "系统日志", icon: ScrollText },
     { id: "settings", label: "设置", icon: Settings },
   ];
@@ -268,6 +272,7 @@ export default function App() {
     { id: "checkin", node: <CheckinPage /> },
     { id: "token-stats", node: <TokenStatsPage /> },
     { id: "scheduler", node: <SchedulerPage /> },
+    { id: "manual", node: <ManualPage /> },
     { id: "logs", node: <LogsPage /> },
     { id: "settings", node: <SettingsPage /> },
   ];

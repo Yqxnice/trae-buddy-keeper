@@ -1,0 +1,109 @@
+.manual {
+  max-width: 860px;
+}
+
+/* 快速上手三步 */
+.m-steps {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  flex-wrap: wrap;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin-bottom: 4px;
+}
+.m-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 200px;
+}
+.m-no {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--brand-soft);
+  color: var(--brand-ink);
+  font-size: 11.5px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+.m-ico {
+  color: var(--muted);
+  flex: none;
+}
+
+/* 分节卡片 */
+.m-card {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 4px 20px;
+  margin-bottom: 4px;
+}
+.m-row {
+  display: grid;
+  grid-template-columns: 132px 1fr;
+  gap: 16px;
+  padding: 11px 0;
+}
+.m-row + .m-row {
+  border-top: 1px solid var(--rule);
+}
+.m-name {
+  font-size: 13px;
+  font-weight: 650;
+  padding-top: 1px;
+}
+.m-desc {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+/* 常见问题折叠项 */
+.m-faq {
+  padding: 10px 0;
+}
+.m-faq + .m-faq {
+  border-top: 1px solid var(--rule);
+}
+.m-faq summary {
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+}
+.m-faq summary::before {
+  content: "›";
+  color: var(--muted);
+  font-weight: 700;
+  transition: transform 0.15s ease;
+}
+.m-faq[open] summary::before {
+  transform: rotate(90deg);
+}
+.m-faq-a {
+  margin: 8px 0 2px;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+/* 窄屏退化为单列 */
+@media (max-width: 640px) {
+  .m-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+}

@@ -143,7 +143,6 @@ export const api = {
   setNotificationMode: (mode: string) => invoke<void>("set_notification_mode", { mode }),
   renewToken: (id: string) => invoke<string>("renew_token", { id }),
   autoRenewAll: () => invoke<string[]>("auto_renew_all"),
-  generateQr: (text: string) => invoke<string>("generate_qr", { text }),
   startTraeOauth: () => invoke<string>("start_trae_oauth"),
   stopTraeOauth: () => invoke<void>("stop_trae_oauth"),
   completeTraeOauth: (callbackUrl: string, name?: string) =>

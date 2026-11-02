@@ -263,21 +263,6 @@ pub async fn do_checkin(acc: &Account, device_id: &str) -> Result<(bool, i64, St
     }
 }
 
-// 检测 token 是否有效（简单探测）
-pub async fn verify_token(access_token: &str, device_id: &str) -> Result<bool> {
-    let client = Client::new();
-    let url = format!("{}/trae/api/v2/ug/checkin_credits/status", TRAE_BASE);
-    let resp = ug_authed(&client, &url, access_token, device_id)
-        .body("{}")
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        return Ok(false);
-    }
-    let v: Value = resp.json().await.unwrap_or_default();
-    Ok(v.get("code").and_then(|c| c.as_i64()).unwrap_or(0) == 0)
-}
-
 /// 查询资格包过期记录（/trae/api/v2/pay/expired_ents，只读）。
 /// 返回 (到期秒, 包总额, 包名)；临期与已过期都在列表里，调用方自行取舍。
 /// 仅用于给积分包明细补充名称，失败不影响余额查询主流程。

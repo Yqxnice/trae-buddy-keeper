@@ -10,6 +10,10 @@ export default defineConfig({
     },
   },
   clearScreen: false,
+  build: {
+    // 桌面端资源从本地磁盘加载，大 chunk 不影响启动速度，放宽警告阈值
+    chunkSizeWarningLimit: 1500,
+  },
   server: {
     port: 1420,
     strictPort: true,

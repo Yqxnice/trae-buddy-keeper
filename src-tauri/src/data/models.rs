@@ -2,22 +2,6 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Platform {
-    Trae,
-    Workbuddy,
-}
-
-impl Platform {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Platform::Trae => "trae",
-            Platform::Workbuddy => "workbuddy",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum CheckinStatus {
     Idle,
     Success,
@@ -248,11 +232,6 @@ impl Default for AppSettings {
             client_path_codebuddy_cn: String::new(),
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NotificationSettings {
-    pub mode: String, // toast | system | both | none
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

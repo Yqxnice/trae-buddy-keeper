@@ -3,8 +3,6 @@ use tauri::{AppHandle, Emitter};
 #[cfg(not(windows))]
 use tauri_plugin_notification::NotificationExt;
 
-use crate::data::models::NotificationSettings;
-
 pub struct Notifier {
     app: AppHandle,
     mode: Arc<tokio::sync::Mutex<String>>,
@@ -125,8 +123,3 @@ pub fn register_windows_app_id(app_id: &str, display_name: &str) {
         .output();
 }
 
-pub fn load_notification_settings() -> NotificationSettings {
-    NotificationSettings {
-        mode: "both".to_string(),
-    }
-}

@@ -532,26 +532,6 @@ impl Database {
         Ok(pkgs)
     }
 
-    /// TRAE 积分包（points_history 中未过期的条目）：(account_id, points, expires_at)
-    pub fn list_points_packages(&self, platform: &str) -> Result<Vec<(String, f64, i64)>> {
-        let conn = self.conn.lock().unwrap();
-        let now = chrono::Utc::now().timestamp();
-        let mut stmt = conn.prepare(
-            r#"SELECT ph.account_id, ph.points, ph.expires_at
-                FROM points_history ph JOIN accounts a ON ph.account_id=a.id
-                WHERE a.platform=?1 AND ph.expires_at > ?2
-                ORDER BY ph.expires_at ASC"#,
-        )?;
-        let rows = stmt.query_map(params![platform, now], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    }
-
     // ===== 通用设置 =====
     pub fn load_app_settings(&self) -> AppSettings {
         match self.get_setting("app_settings") {

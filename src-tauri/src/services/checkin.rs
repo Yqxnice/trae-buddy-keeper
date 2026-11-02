@@ -54,10 +54,6 @@ impl CheckinService {
         }
     }
 
-    pub async fn is_running(&self) -> bool {
-        *self.running.lock().await
-    }
-
     // 单账户签到（含冷却与隔离判断）
     pub async fn checkin_one(&self, account_id: &str) -> Result<CheckinResult, String> {
         let acc = self

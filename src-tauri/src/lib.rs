@@ -142,7 +142,6 @@ pub fn run() {
             set_notification_mode,
             renew_token,
             auto_renew_all,
-            generate_qr,
             crate::platform::trae::oauth::start_trae_oauth,
             crate::platform::trae::oauth::stop_trae_oauth,
             crate::platform::trae::oauth::complete_trae_oauth,
@@ -793,12 +792,7 @@ async fn auto_renew_all(state: State<'_, AppState>) -> Result<Vec<String>, Strin
     Ok(msgs)
 }
 
-// ===== 扫码登录 =====
-
-#[tauri::command]
-fn generate_qr(text: String) -> Result<String, String> {
-    crate::infra::qrcode::generate_qr_base64(&text).map_err(|e| e.to_string())
-}
+// ===== 账户切换 =====
 
 #[tauri::command]
 fn switch_account(state: State<AppState>, id: String) -> Result<String, String> {

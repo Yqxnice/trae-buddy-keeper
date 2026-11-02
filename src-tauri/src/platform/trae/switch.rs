@@ -109,12 +109,6 @@ pub fn vault_real_device_id(data_dir: &Path, account_id: &str) -> Option<String>
     device_id_from_storage(&storage_path(&vault_dir(data_dir, account_id)))
 }
 
-/// 当前 live 客户端注册过的设备号（本机 Trae CN 最近一次登录用的那个）
-pub fn live_real_device_id() -> Option<String> {
-    let root = data_root().ok()?;
-    device_id_from_storage(&storage_path(&root))
-}
-
 // ===== 文件树操作 =====
 
 fn is_excluded_dir(name: &str) -> bool {

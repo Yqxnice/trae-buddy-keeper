@@ -5,9 +5,6 @@ use serde_json::Value;
 use super::variant::variant_of;
 use crate::data::models::Account;
 
-/// 兼容旧代码的国内版基址；实际请求一律用 `base_for(acc)` 按档位取
-const WB_BASE: &str = "https://www.codebuddy.cn";
-
 /// 按账号档位取 API 基址（国内 www.codebuddy.cn / 国际 www.workbuddy.ai）
 fn base_for(acc: &Account) -> &'static str {
     variant_of(acc).api_endpoint()
@@ -82,23 +79,6 @@ pub async fn do_checkin(acc: &Account) -> Result<(bool, i64, String)> {
     }
     let points = 100; // WorkBuddy 签到固定 100 积分
     Ok((true, points, format!("签到成功 +{}", points)))
-}
-
-pub async fn verify_cookies(cookies_json: &str) -> Result<bool> {
-    let client = Client::new();
-    let cookie = cookie_header(cookies_json)?;
-    // 手动粘贴 cookie 的入口只存在于国内版流程
-    let url = format!("{WB_BASE}/billing/meter/check-gift-claimed");
-    let resp = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .header("Cookie", &cookie)
-        .header("Origin", WB_BASE)
-        .header("Referer", &format!("{WB_BASE}/profile/usage"))
-        .body("{}")
-        .send()
-        .await?;
-    Ok(resp.status().is_success())
 }
 
 /// 用 refreshToken 换新 accessToken（对齐参考项目 issue #40 口径）：

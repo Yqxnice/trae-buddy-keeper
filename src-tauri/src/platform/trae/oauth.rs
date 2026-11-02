@@ -744,6 +744,10 @@ pub async fn complete_trae_oauth(
                 machine_id,
             );
         }
+        // 重新授权前可能在官方客户端签过到：回查真实状态，避免误显示未签到
+        if let Ok(Some(fresh)) = state.db.get_account(&existing.id) {
+            state.checkin.sync_checkin_status(&fresh).await;
+        }
         stop_server_inner(&server);
         return Ok(format!("账户「{}」凭据已更新", existing.name));
     }
@@ -789,6 +793,8 @@ pub async fn complete_trae_oauth(
         "登录",
         &format!("TRAE 网页授权成功：{}", display_name),
     );
+    // 授权前可能在官方客户端签过到：回查真实状态，避免新账号误显示未签到
+    state.checkin.sync_checkin_status(&acc).await;
     stop_server_inner(&server);
     Ok(format!("账户「{}」已添加", display_name))
 }

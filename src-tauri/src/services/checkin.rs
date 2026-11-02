@@ -218,6 +218,44 @@ impl CheckinService {
         })
     }
 
+    /// 授权登录后回查服务端真实签到状态：用户可能刚在官方客户端里签过到，
+    /// 本地无记录会误显示「未签到」。查询到已签时直接把账号落为今日已签；
+    /// 查询失败静默忽略（不打断登录流程，也不写失败日志），后续签到尝试会自愈。
+    pub async fn sync_checkin_status(&self, acc: &Account) {
+        let now = Utc::now().timestamp();
+        // 国际版无签到体系；凭证失效的账号查了也查不动
+        if acc.platform == "workbuddy"
+            && crate::platform::workbuddy::variant::variant_of(acc)
+                == crate::platform::workbuddy::variant::WbVariant::Ai
+        {
+            return;
+        }
+        if is_expired(acc, now) {
+            return;
+        }
+        let signed = match acc.platform.as_str() {
+            "trae" => {
+                let device_id = self.trae_device_id(acc);
+                let client = reqwest::Client::new();
+                trae_api::checkin_status(&client, &acc.access_token, &device_id)
+                    .await
+                    .map(|(claimed, _enabled, _)| claimed)
+                    .unwrap_or(false)
+            }
+            "workbuddy" => workbuddy_api::checkin_status(acc).await.unwrap_or(false),
+            _ => return,
+        };
+        if signed {
+            let _ = self.db.update_account_checkin(
+                &acc.id,
+                CheckinStatus::Success.as_str(),
+                now,
+                0,
+                0,
+            );
+        }
+    }
+
     // 批量签到（可按平台过滤）
     /// 批量签到；platforms 为 None 时签到全部平台，否则仅签到范围内的平台
     pub async fn checkin_all(

@@ -1,8 +1,10 @@
+//! 实现参考了开源项目 workbuddy-switch。
+
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde_json::Value;
 
-use super::variant::variant_of;
+use super::variant::{variant_of, WbVariant};
 use crate::data::models::Account;
 
 /// 按账号档位取 API 基址（国内 www.codebuddy.cn / 国际 www.workbuddy.ai）
@@ -79,6 +81,84 @@ pub async fn do_checkin(acc: &Account) -> Result<(bool, i64, String)> {
     }
     let points = 100; // WorkBuddy 签到固定 100 积分
     Ok((true, points, format!("签到成功 +{}", points)))
+}
+
+/// 查询今日是否已签到（国内版专有接口；国际版无签到体系，由调用方跳过）。
+/// 先试新接口 checkin-activity-status，仅 404 路由缺失时回退老接口 checkin-status，
+/// 鉴权与业务错误原样返回避免掩盖真因。结果取 data.today_checked_in / todayCheckedIn。
+pub async fn checkin_status(acc: &Account) -> Result<bool> {
+    if variant_of(acc) != WbVariant::Cn {
+        return Err(anyhow!("该档位无签到状态接口"));
+    }
+    let client = Client::new();
+    let wb_base = base_for(acc);
+    let token_mode = acc.cookies.trim().is_empty() && !acc.access_token.trim().is_empty();
+    let candidates = if token_mode {
+        vec![
+            "/v2/billing/meter/checkin-activity-status",
+            "/v2/billing/meter/checkin-status",
+        ]
+    } else {
+        vec![
+            "/billing/meter/checkin-activity-status",
+            "/billing/meter/checkin-status",
+        ]
+    };
+    let mut last = anyhow!("签到状态查询失败");
+    for path in candidates {
+        let req = if token_mode {
+            client
+                .post(format!("{wb_base}{path}"))
+                .header("Content-Type", "application/json")
+                .bearer_auth(acc.access_token.trim())
+                .header("Origin", wb_base)
+                .header("Referer", &format!("{wb_base}/"))
+                .body("{}")
+        } else {
+            let cookie = cookie_header(&acc.cookies)?;
+            if cookie.is_empty() {
+                return Err(anyhow!("无可用 cookie"));
+            }
+            client
+                .post(format!("{wb_base}{path}"))
+                .header("Content-Type", "application/json")
+                .header("Cookie", &cookie)
+                .header("Origin", wb_base)
+                .header("Referer", &format!("{wb_base}/profile/usage"))
+                .body("{}")
+        };
+        let resp = req.send().await.map_err(|e| anyhow!("请求失败: {e}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(anyhow!("凭证已过期(401)，请重新登录"));
+        }
+        // 404 视为新接口未开放，回落老接口；其余 HTTP 错误原样返回
+        if status.as_u16() == 404 {
+            last = anyhow!("签到状态路由缺失: {path}");
+            continue;
+        }
+        if !status.is_success() {
+            return Err(anyhow!("签到状态查询失败: {status} {text}"));
+        }
+        let v: Value = serde_json::from_str(&text).map_err(|e| anyhow!("响应解析失败: {e}"))?;
+        let code = v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+        if code != 0 && code != 200 {
+            let msg = v
+                .get("msg")
+                .or_else(|| v.get("message"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("未知错误");
+            return Err(anyhow!("签到状态查询失败 code={code} {msg}"));
+        }
+        let data = v.get("data").cloned().unwrap_or(Value::Null);
+        return Ok(data
+            .get("today_checked_in")
+            .or_else(|| data.get("todayCheckedIn"))
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false));
+    }
+    Err(last)
 }
 
 /// 用 refreshToken 换新 accessToken（对齐参考项目 issue #40 口径）：

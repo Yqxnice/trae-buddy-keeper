@@ -278,6 +278,8 @@ pub async fn poll_workbuddy_login(
         "登录",
         &format!("WorkBuddy（{version_label}）网页授权成功：{}", name),
     );
+    // 授权前可能在官方客户端签过到：回查真实状态，避免新账号误显示未签到
+    app_state.checkin.sync_checkin_status(&acc).await;
     Ok(WorkbuddyLoginPoll {
         status: "ready".to_string(),
         name,

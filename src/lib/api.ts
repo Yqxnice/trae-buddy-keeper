@@ -159,8 +159,8 @@ export const api = {
   switchTraeClient: (id: string) =>
     invoke<string>("switch_trae_client", { id }),
   traeClientRunning: () => invoke<boolean>("trae_client_running"),
-  backupTraeVault: (id: string) =>
-    invoke<string>("backup_trae_vault", { id }),
+  backupTraeVault: (id: string, closeRunning = false) =>
+    invoke<string>("backup_trae_vault", { id, closeRunning }),
   traeVaultInfo: (id: string) =>
     invoke<[number, number] | null>("trae_vault_info", { id }),
   refreshCredits: (id: string) => invoke<CreditResult>("refresh_credits", { id }),

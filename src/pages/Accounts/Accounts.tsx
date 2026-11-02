@@ -359,13 +359,30 @@ export function AccountsPage() {
   };
 
   // Trae：把当前客户端登录态快照到该账号（建档），切换的前提
-  const handleArchive = async (id: string) => {
+  const handleArchive = async (id: string, closeRunning = false) => {
     setArchivingId(id);
     try {
-      const msg = await api.backupTraeVault(id);
+      const msg = await api.backupTraeVault(id, closeRunning);
       pushToast("建档成功", msg, "success");
     } catch (e: any) {
-      pushToast("建档失败", e?.toString(), "error");
+      const msg = String(e ?? "");
+      // 客户端仍在后台运行：征得用户确认后自动关闭（温和→强杀）再建档
+      if (msg.startsWith("CLIENT_RUNNING:") && !closeRunning) {
+        const ok = await confirmDialog({
+          title: "客户端仍在运行",
+          message:
+            "检测到 Trae 客户端仍在后台运行（点窗口 × 可能只是驻留后台，并未退出进程）。\n\n注意：关闭会退出全部 Trae 窗口——如果你正在用 Trae 改代码，未保存的内容会丢失，建议先保存或改完再建档。\n\n是否关闭客户端并继续建档？",
+          confirmText: "关闭并建档",
+        });
+        setArchivingId(null);
+        if (ok) await handleArchive(id, true);
+        return;
+      }
+      pushToast(
+        "建档失败",
+        msg.replace("CLIENT_RUNNING:", ""),
+        "error",
+      );
     } finally {
       setArchivingId(null);
     }

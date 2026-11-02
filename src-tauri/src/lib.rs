@@ -942,9 +942,14 @@ fn resolve_trae_exe(db: &Database) -> String {
     }
 }
 
-/// Trae 账号建档：把当前客户端登录态快照到该账号的 vault（要求客户端已关闭）
+/// Trae 账号建档：把当前客户端登录态快照到该账号的 vault（要求客户端已关闭）。
+/// close_running=true 时自动关闭仍在运行的客户端后再建档（前端已弹窗征得确认）。
 #[tauri::command]
-async fn backup_trae_vault(state: State<'_, AppState>, id: String) -> Result<String, String> {
+async fn backup_trae_vault(
+    state: State<'_, AppState>,
+    id: String,
+    close_running: bool,
+) -> Result<String, String> {
     let acc = state
         .db
         .get_account(&id)
@@ -963,7 +968,7 @@ async fn backup_trae_vault(state: State<'_, AppState>, id: String) -> Result<Str
     let db = state.db.clone();
     let name = acc.name.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        crate::platform::trae::switch::backup_vault(&data_dir, &id, &image)
+        crate::platform::trae::switch::backup_vault(&data_dir, &id, &image, close_running)
     })
     .await
     .map_err(|e| format!("建档任务执行失败: {e}"))?;

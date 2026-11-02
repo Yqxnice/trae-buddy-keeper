@@ -9,24 +9,45 @@ pub struct ClientPaths {
     pub codebuddy_cn: String,
 }
 
-/// 按 DisplayName 匹配卸载项：TRAE/TRAE CN、WorkBuddy（排除 Manager）、
+/// 按 DisplayName 匹配卸载项：TRAE/TRAE CN、WorkBuddy（排除 Manager/Switch 等第三方）、
 /// WorkBuddy AI（国际版客户端，须先于 WorkBuddy 判定）、CodeBuddy CN/CodeBuddy
 fn classify(display_name: &str) -> Option<&'static str> {
     let n = display_name.trim();
     let lower = n.to_lowercase();
+    // 本项目安装版 DisplayName「TraeBuddy Keeper」同样以 trae 开头，必须先排除，
+    // 否则自动获取会把自身安装路径当成 Trae 客户端，后续存档/切换会误杀自己
+    if lower.starts_with("traebuddy") || lower.starts_with("trae buddy") {
+        return None;
+    }
     if lower.starts_with("trae") {
         return Some("trae");
     }
     if lower.starts_with("workbuddy ai") {
         return Some("workbuddy_ai");
     }
-    if lower.starts_with("workbuddy") && !lower.contains("manager") {
+    // switch 同理排除第三方工具（如 workbuddy-switch），官方客户端名不含该词
+    if lower.starts_with("workbuddy") && !lower.contains("manager") && !lower.contains("switch") {
         return Some("workbuddy");
     }
     if lower.starts_with("codebuddy") {
         return Some("codebuddy_cn");
     }
     None
+}
+
+/// 探测结果兜底：exe 文件名与本应用自身相同则视为误配，一律跳过
+fn is_self_exe(path: &str) -> bool {
+    let name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_lowercase());
+    let self_name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().and_then(|n| n.to_str()).map(|s| s.to_lowercase()));
+    match (name, self_name) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
 }
 
 fn valid_exe(path: &str) -> Option<String> {
@@ -116,6 +137,10 @@ fn detect_from_registry() -> ClientPaths {
             None
         });
         if let Some(path) = found {
+            // 兜底：即使 DisplayName 绕过了分类排除，也不允许把自身当作客户端
+            if is_self_exe(&path) {
+                continue;
+            }
             match client {
                 "trae" => out.trae = path,
                 "workbuddy" => out.workbuddy = path,

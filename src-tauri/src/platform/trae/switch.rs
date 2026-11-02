@@ -237,15 +237,17 @@ fn kill_client(image: &str) -> Result<(), String> {
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
+        // 注意：不能带 /T（杀进程树）——从 Trae 终端启动的无关子进程（如开发调试中的
+        // 本应用 dev 实例）也在树内，会被连坐。Electron 全部进程映像名相同，/IM 已覆盖。
         let _ = std::process::Command::new("taskkill")
-            .args(["/IM", image, "/T"])
+            .args(["/IM", image])
             .creation_flags(CREATE_NO_WINDOW)
             .output();
         if wait_exit(image, GRACEFUL_WAIT_SECS) {
             return Ok(());
         }
         let _ = std::process::Command::new("taskkill")
-            .args(["/IM", image, "/T", "/F"])
+            .args(["/IM", image, "/F"])
             .creation_flags(CREATE_NO_WINDOW)
             .output();
         if wait_exit(image, FORCE_WAIT_SECS) {
@@ -313,6 +315,23 @@ fn has_auth_creds(storage: &Path) -> Option<bool> {
 
 // ===== 对外：建档 / 查询 / 切换 =====
 
+/// 历史坏配置兜底：客户端路径可能被误配成本应用自身（自动获取曾把
+/// 「TraeBuddy Keeper」安装项当成 Trae 命中），此时绝不能对自身检测/关闭
+fn ensure_not_self(image: &str) -> Result<(), String> {
+    let self_name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().and_then(|n| n.to_str()).map(|s| s.to_lowercase()));
+    if let Some(self_name) = self_name {
+        if image.to_lowercase() == self_name {
+            return Err(
+                "客户端路径配置错误：指向了本应用自身，请到设置页重新自动获取或手动修正 Trae 客户端路径"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
 /// 查询账号建档信息：(建档时间 epoch 秒, 载体文件数)；未建档返回 None
 pub fn vault_info(data_dir: &Path, account_id: &str) -> Option<(i64, usize)> {
     let meta_path = vault_dir(data_dir, account_id).join("meta.json");
@@ -323,10 +342,28 @@ pub fn vault_info(data_dir: &Path, account_id: &str) -> Option<(i64, usize)> {
     Some((created, entries))
 }
 
-/// 建档：把当前 live 登录态快照到账号 vault。要求客户端已关闭（运行中拷 SQLite 必不自洽）
-pub fn backup_vault(data_dir: &Path, account_id: &str, image: &str) -> Result<String, String> {
+/// 建档：把当前 live 登录态快照到账号 vault。要求客户端已关闭（运行中拷 SQLite 必不自洽）。
+/// 客户端运行中且 close_running=false 时返回 CLIENT_RUNNING: 前缀错误（前端据此弹确认）；
+/// close_running=true 则先温和关闭（WM_CLOSE），超时再强杀，与切换流程同一套 kill_client。
+pub fn backup_vault(
+    data_dir: &Path,
+    account_id: &str,
+    image: &str,
+    close_running: bool,
+) -> Result<String, String> {
+    ensure_not_self(image)?;
     if client_running(image) {
-        return Err("建档前请先关闭 Trae CN 客户端（运行中快照会不一致）".to_string());
+        if !close_running {
+            return Err(
+                "CLIENT_RUNNING:Trae 客户端仍在后台运行（点窗口 × 可能只是驻留后台，并未退出进程）"
+                    .to_string(),
+            );
+        }
+        kill_client(image)?;
+        // 双重确认：kill_client 成功后进程必然已退出
+        if client_running(image) {
+            return Err("客户端进程未能完全退出，请手动结束后重试".to_string());
+        }
     }
     let root = data_root()?;
     if !root.exists() {
@@ -379,6 +416,7 @@ pub fn switch_to_vault(data_dir: &Path, account_id: &str, exe: &str) -> Result<S
         .and_then(|n| n.to_str())
         .unwrap_or("Trae CN.exe")
         .to_string();
+    ensure_not_self(&image)?;
 
     kill_client(&image)?;
 

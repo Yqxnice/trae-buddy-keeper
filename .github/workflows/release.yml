@@ -30,7 +30,7 @@ jobs:
           RANGE="${GITHUB_REF_NAME}"
           if [ -n "$PREV" ]; then RANGE="$PREV..${GITHUB_REF_NAME}"; fi
           {
-            echo "body<<'NOTES_EOF'"
+            echo "body<<NOTES_EOF"
             echo "## 本版变更"
             echo
             git log --reverse --pretty=format:"- %s (%h)" "$RANGE"

@@ -14,14 +14,14 @@ use serde_json::Value;
 use tauri::State;
 use uuid::Uuid;
 
+use super::variant::{parse_variant, variant_of, WbVariant};
 use crate::data::models::{Account, CheckinStatus};
 use crate::AppState;
 
-/// 登录接口基址（国内版；platform=workbuddy 换取桌面端会话 token，
+/// 登录接口基址：国内 www.codebuddy.cn / 国际 www.workbuddy.ai，
+/// 按 variant 取（platform=workbuddy[-ai] 换取桌面端会话 token，
 /// 用 platform=CLI 拿到的 token 只能调 billing/签到接口，写进桌面客户端会被拒登）
-const CHAT_BASE: &str = "https://www.codebuddy.cn";
 const UA: &str = "CLI/2.63.2 CodeBuddy/2.63.2";
-const ORIGIN: &str = "https://www.codebuddy.cn";
 
 /// 时间戳归一化为秒：官方 expiresAt 字段可能给毫秒
 fn norm_ts_secs(v: Option<&Value>) -> Option<i64> {
@@ -29,13 +29,18 @@ fn norm_ts_secs(v: Option<&Value>) -> Option<i64> {
     Some(if n > 1_000_000_000_000 { n / 1000 } else { n })
 }
 
-fn http() -> reqwest::Client {
+/// HTTP 客户端：Origin/Referer 跟随档位基址
+fn http(variant: WbVariant) -> reqwest::Client {
+    let origin = variant.api_endpoint();
     let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert("Accept", "application/json, text/plain, */*".parse().unwrap());
+    headers.insert(
+        "Accept",
+        "application/json, text/plain, */*".parse().unwrap(),
+    );
     headers.insert("X-Requested-With", "XMLHttpRequest".parse().unwrap());
     headers.insert("User-Agent", UA.parse().unwrap());
-    headers.insert("Origin", ORIGIN.parse().unwrap());
-    headers.insert("Referer", format!("{ORIGIN}/").parse().unwrap());
+    headers.insert("Origin", origin.parse().unwrap());
+    headers.insert("Referer", format!("{origin}/").parse().unwrap());
     reqwest::Client::builder()
         .default_headers(headers)
         .build()
@@ -51,16 +56,24 @@ pub struct WorkbuddyLoginStart {
 
 /// 第一步：获取登录 state + 授权链接，并呼出系统浏览器
 #[tauri::command]
-pub async fn start_workbuddy_login() -> Result<WorkbuddyLoginStart, String> {
-    let resp = http()
+pub async fn start_workbuddy_login(
+    variant: Option<String>,
+) -> Result<WorkbuddyLoginStart, String> {
+    let variant = parse_variant(variant.as_deref());
+    let base = variant.api_endpoint();
+    let resp = http(variant)
         .post(format!(
-            "{CHAT_BASE}/v2/plugin/auth/state?platform=workbuddy"
+            "{base}/v2/plugin/auth/state?platform={}",
+            variant.oauth_platform()
         ))
         .json(&serde_json::json!({}))
         .send()
         .await
-        .map_err(|e| format!("连不上腾讯登录接口: {e}（请检查网络/代理）"))?;
-    let v: Value = resp.json().await.map_err(|e| format!("响应解析失败: {e}"))?;
+        .map_err(|e| format!("连不上登录接口: {e}（请检查网络）"))?;
+    let v: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("响应解析失败: {e}"))?;
     let code = v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
     let data = v.get("data").cloned().unwrap_or(Value::Null);
     if code != 0 {
@@ -97,19 +110,25 @@ pub struct WorkbuddyLoginPoll {
 pub async fn poll_workbuddy_login(
     app_state: State<'_, AppState>,
     login_state: String,
+    variant: Option<String>,
 ) -> Result<WorkbuddyLoginPoll, String> {
+    let expected = parse_variant(variant.as_deref());
+    let base = expected.api_endpoint();
     let waiting = || WorkbuddyLoginPoll {
         status: "waiting".to_string(),
         name: String::new(),
     };
 
-    let resp = http()
-        .get(format!("{CHAT_BASE}/v2/plugin/auth/token"))
+    let resp = http(expected)
+        .get(format!("{base}/v2/plugin/auth/token"))
         .query(&[("state", login_state.as_str())])
         .send()
         .await
-        .map_err(|e| format!("连不上腾讯登录接口: {e}"))?;
-    let v: Value = resp.json().await.map_err(|e| format!("响应解析失败: {e}"))?;
+        .map_err(|e| format!("连不上登录接口: {e}"))?;
+    let v: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("响应解析失败: {e}"))?;
     let code = v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
     let data = v.get("data").cloned().unwrap_or(Value::Null);
     let access_token = data
@@ -134,31 +153,36 @@ pub async fn poll_workbuddy_login(
                 .and_then(|s| s.as_i64())
                 .unwrap_or(3600)
         });
-    let refresh_expires_at =
-        norm_ts_secs(data.get("refreshExpiresAt").or_else(|| data.get("refresh_expires_at")))
-            .unwrap_or(now + 30 * 86400);
+    let refresh_expires_at = norm_ts_secs(
+        data.get("refreshExpiresAt")
+            .or_else(|| data.get("refresh_expires_at")),
+    )
+    .unwrap_or(now + 30 * 86400);
 
-    // 档位校验：响应 domain 必须是国内版产品域，否则写进客户端会一直登录失效
+    // 档位校验：响应 domain 必须与登录档位相符，否则写进客户端会一直登录失效
     let domain = data
         .get("domain")
         .and_then(|d| d.as_str())
         .unwrap_or("")
         .to_string();
-    if !domain.is_empty() && domain != "www.codebuddy.cn" && domain != "www.workbuddy.cn" {
+    if !expected.matches_domain(&domain) {
         return Err(format!(
-            "登录响应的 domain（{domain}）不是国内版，已拒绝入库"
+            "登录响应的 domain（{domain}）与所选版本不符，已拒绝入库"
         ));
     }
 
     // 第三步：取账号信息（昵称 / uid）
-    let acct = http()
-        .get(format!("{CHAT_BASE}/v2/plugin/login/account"))
+    let acct = http(expected)
+        .get(format!("{base}/v2/plugin/login/account"))
         .query(&[("state", login_state.as_str())])
         .bearer_auth(&access_token)
         .send()
         .await
         .map_err(|e| format!("获取账号信息失败: {e}"))?;
-    let av: Value = acct.json().await.map_err(|e| format!("账号信息解析失败: {e}"))?;
+    let av: Value = acct
+        .json()
+        .await
+        .map_err(|e| format!("账号信息解析失败: {e}"))?;
     let adata = av.get("data").cloned().unwrap_or(Value::Null);
     let uid = adata
         .get("uid")
@@ -171,12 +195,18 @@ pub async fn poll_workbuddy_login(
         .unwrap_or("")
         .to_string();
     // 头像：接口可能返回 avatar / avatarUrl / avatar_url / portrait 等键
-    let avatar = ["avatar", "avatarUrl", "avatar_url", "portrait", "headImageUrl"]
-        .iter()
-        .filter_map(|k| adata.get(*k).and_then(|s| s.as_str()))
-        .find(|s| !s.is_empty())
-        .unwrap_or("")
-        .to_string();
+    let avatar = [
+        "avatar",
+        "avatarUrl",
+        "avatar_url",
+        "portrait",
+        "headImageUrl",
+    ]
+    .iter()
+    .filter_map(|k| adata.get(*k).and_then(|s| s.as_str()))
+    .find(|s| !s.is_empty())
+    .unwrap_or("")
+    .to_string();
     // 企业账号字段：积分查询按 enterpriseId / type=ultimate|exclusive 分流企业接口
     let enterprise_id = adata
         .get("enterpriseId")
@@ -196,6 +226,15 @@ pub async fn poll_workbuddy_login(
         format!("wb-{uid}")
     } else {
         format!("workbuddy-{}", now % 10000)
+    };
+    // 档位落库以 domain 为准（下游按 domain 后缀判档）：响应缺失时按所选档位补产品默认域
+    let domain = if domain.is_empty() {
+        match expected {
+            WbVariant::Ai => "www.workbuddy.ai".to_string(),
+            WbVariant::Cn => domain,
+        }
+    } else {
+        domain
     };
     let acc = Account {
         id: Uuid::new_v4().to_string(),
@@ -225,11 +264,19 @@ pub async fn poll_workbuddy_login(
         credits_expiries: String::new(),
         credits_fetched_at: 0,
     };
-    app_state.db.insert_account(&acc).map_err(|e| e.to_string())?;
+    let variant_of_acc = variant_of(&acc);
+    app_state
+        .db
+        .insert_account(&acc)
+        .map_err(|e| e.to_string())?;
+    let version_label = match variant_of_acc {
+        WbVariant::Ai => "国际版",
+        WbVariant::Cn => "国内版",
+    };
     app_state.db.log(
         "success",
         "登录",
-        &format!("WorkBuddy 网页授权成功：{}", name),
+        &format!("WorkBuddy（{version_label}）网页授权成功：{}", name),
     );
     Ok(WorkbuddyLoginPoll {
         status: "ready".to_string(),

@@ -26,6 +26,7 @@ import { ConfirmHost } from "@/components/ConfirmDialog/ConfirmDialog";
 import { SelectorBar } from "@/components/SelectorBar/SelectorBar";
 import { SideNav, type NavItem } from "@/components/SideNav/SideNav";
 import { api } from "@/lib/api";
+import { updater } from "@/lib/updater";
 import { useCheckinStore } from "@/stores/checkin";
 import { useUIStore } from "@/stores/ui";
 import { platformLabel, checkinDayStart } from "@/lib/utils";
@@ -87,7 +88,7 @@ function Titlebar({
       {/* 应用标识 */}
       <div className="tb-brand" data-tauri-drag-region>
         <span className="tb-mark" />
-        <span>AI 账户管家</span>
+        <span>TraeBuddy Keeper</span>
       </div>
 
       {/* 产品切换：一个产品对应一组功能 */}
@@ -138,12 +139,38 @@ export default function App() {
     };
   }, []);
 
+  // 监听后端签到完成事件（定时签到/超时补签），驱动订阅页刷新状态
+  useEffect(() => {
+    const unlisten = listen("checkin-done", () => {
+      useUIStore.getState().bumpCheckin();
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
+
   // 启动时按已保存设置应用外观主题（默认浅色）
   useEffect(() => {
     api
       .getAppSettings()
       .then((s) => applyTheme(normalizeTheme(s.theme)))
       .catch(() => applyTheme("light"));
+  }, []);
+
+  // 启动 5 秒后静默检查更新（仅生产构建）；发现新版本轻提示，不打扰使用
+  useEffect(() => {
+    if (!import.meta.env.PROD) return;
+    const timer = setTimeout(() => {
+      updater
+        .check()
+        .then((v) => {
+          if (v) {
+            useUIStore.getState().pushToast("发现新版本", `v${v} 已发布，可在「设置」页更新`, "info");
+          }
+        })
+        .catch(() => {});
+    }, 5000);
+    return () => clearTimeout(timer);
   }, []);
 
   // 定时签到设置为跨页共享状态（总览读 / 定时任务写），启动时加载一次
@@ -157,6 +184,7 @@ export default function App() {
       try {
         const results = await api.checkinAll();
         const success = results.filter((r) => r.success).length;
+        useUIStore.getState().bumpCheckin();
         useUIStore
           .getState()
           .pushToast(
@@ -213,18 +241,12 @@ export default function App() {
     setVisited((v) => (v.includes(tab) ? v : [...v, tab]));
   }, [tab]);
 
-  // TRAE 没有可统计的 token 用量数据源（本地对话库加密、服务端只有 credits 口径），
-  // 因此该产品下不展示 Token 统计入口
-  const isVisible = (id: Tab) => !(platform === "trae" && id === "token-stats");
-
   const navItems: NavItem[] = [
     { id: "dashboard", label: "总览", icon: LayoutDashboard },
     { id: "accounts", label: "账号", icon: Users, dot: navDots.accounts ?? null },
     { id: "credits", label: "积分", icon: Coins },
     { id: "checkin", label: "签到", icon: CalendarCheck, dot: navDots.checkin ?? null },
-    ...(platform === "trae"
-      ? []
-      : [{ id: "token-stats" as Tab, label: "Token 统计", icon: BarChart3 }]),
+    { id: "token-stats", label: "Token 统计", icon: BarChart3 },
   ];
 
   const footItems: NavItem[] = [
@@ -233,12 +255,9 @@ export default function App() {
     { id: "settings", label: "设置", icon: Settings },
   ];
 
-  // 切到 TRAE 时若停留在 Token 统计，退回总览，避免停留在已隐藏的页面
+  // 切换产品线仅更新全局状态
   const handlePlatformChange = (p: string) => {
     useUIStore.getState().setPlatform(p);
-    if (p === "trae") {
-      setTab((current) => (current === "token-stats" ? "dashboard" : current));
-    }
   };
 
   // 各页面常驻：由外层控制显示/隐藏，组件不因切换而重建
@@ -269,7 +288,7 @@ export default function App() {
         {/* 主内容：访问过的页面保留挂载，非当前页用 hidden 隐藏 */}
         <main className="main scroll-area">
           {pages.map((page) =>
-            isVisible(page.id) && (tab === page.id || visited.includes(page.id)) ? (
+            tab === page.id || visited.includes(page.id) ? (
               <div
                 key={page.id}
                 className={`view-page${tab === page.id ? " anim-viewin" : ""}`}

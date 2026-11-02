@@ -1,16 +1,23 @@
-import { useEffect, useRef, useState } from "react";
-import { RefreshCw, FolderSearch } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { RefreshCw, FolderSearch, FolderOpen, Download, RotateCcw, HardDriveDownload, HardDriveUpload } from "lucide-react";
 import { PageHeader } from "@/components/PageHeader/PageHeader";
 import { Button } from "@/components/Button/Button";
 import { Switch } from "@/components/Switch/Switch";
 import { Select } from "@/components/Select/Select";
 import { Segmented } from "@/components/Segmented/Segmented";
 import { TextInput, NumInput } from "@/components/TextInput/TextInput";
+import { Meter } from "@/components/Meter/Meter";
 import { api, type AppSettings } from "@/lib/api";
+import { useCheckinStore } from "@/stores/checkin";
+import { updater, type UpdatePhase } from "@/lib/updater";
 import { applyTheme, normalizeTheme } from "@/lib/theme";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { useUIStore } from "@/stores/ui";
+import { platformLabel } from "@/lib/utils";
 import "./Settings.css";
+
+/** 定时签到可选的平台范围（CodeBuddy CN 与 WorkBuddy 同账号体系，随 WorkBuddy 一起签到） */
+const SCHED_PLATFORM_KEYS = ["trae", "workbuddy"] as const;
 
 export function SettingsPage() {
   const pushToast = useUIStore((s) => s.pushToast);
@@ -20,8 +27,82 @@ export function SettingsPage() {
   const [theme, setTheme] = useState("light");
   const [detecting, setDetecting] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [dataDir, setDataDir] = useState("");
 
-  const load = async () => {
+  // —— 自动更新状态机：idle → checking → available → downloading → ready ——
+  const [currentVer, setCurrentVer] = useState("");
+  const [phase, setPhase] = useState<UpdatePhase>("idle");
+  const [newVer, setNewVer] = useState("");
+  const [progress, setProgress] = useState(0);
+  const [errMsg, setErrMsg] = useState("");
+
+  useEffect(() => {
+    updater.currentVersion().then(setCurrentVer).catch(() => {});
+  }, []);
+
+  const checkUpdate = async () => {
+    setPhase("checking");
+    setErrMsg("");
+    try {
+      const v = await updater.check();
+      if (v) {
+        setNewVer(v);
+        setPhase("available");
+      } else {
+        setPhase("latest");
+      }
+    } catch (e: any) {
+      setErrMsg(`检查失败：${e?.toString() || "未知错误"}`);
+      setPhase("error");
+    }
+  };
+
+  const installUpdate = async () => {
+    setProgress(0);
+    setPhase("downloading");
+    try {
+      await updater.downloadAndInstall(setProgress);
+      setPhase("ready");
+    } catch (e: any) {
+      setErrMsg(`下载失败：${e?.toString() || "未知错误"}`);
+      setPhase("error");
+    }
+  };
+
+  const relaunchApp = async () => {
+    try {
+      await updater.relaunch();
+    } catch (e: any) {
+      pushToast("重启失败", e?.toString(), "error");
+    }
+  };
+
+  // —— 定时签到平台范围（checkin store，App 启动时已加载）——
+  const schedPlatforms = useCheckinStore((s) => s.settings?.platforms);
+  const updateCheckin = useCheckinStore((s) => s.update);
+  const saveCheckin = useCheckinStore((s) => s.save);
+  // 空数组语义为「全部平台」，UI 上按全选展示，任何勾选变化都会落为显式列表
+  const scopeCurrent =
+    schedPlatforms && schedPlatforms.length > 0 ? schedPlatforms : SCHED_PLATFORM_KEYS;
+
+  const toggleSchedPlatform = async (key: string, on: boolean) => {
+    if (!on && scopeCurrent.length <= 1) {
+      pushToast("无法关闭", "至少保留一个平台参与定时签到", "warning");
+      return;
+    }
+    const next = on
+      ? Array.from(new Set([...scopeCurrent, key]))
+      : scopeCurrent.filter((p) => p !== key);
+    updateCheckin({ platforms: next });
+    try {
+      await saveCheckin();
+      pushToast("已保存", "定时签到平台范围已更新", "success");
+    } catch (e: any) {
+      pushToast("保存失败", e?.toString(), "error");
+    }
+  };
+
+  const load = useCallback(async () => {
     setLoading(true);
     try {
       const [m, a] = await Promise.all([
@@ -31,6 +112,7 @@ export function SettingsPage() {
       setNotifMode(m);
       setAppSettings(a);
       setTheme(normalizeTheme(a.theme));
+      api.getDataDir().then(setDataDir).catch(() => {});
       try {
         setAutoStart(await isEnabled());
       } catch {
@@ -41,11 +123,11 @@ export function SettingsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [pushToast]);
 
   useEffect(() => {
     load();
-  }, []);
+  }, [load]);
 
   const saveNotif = async (mode: string) => {
     setNotifMode(mode);
@@ -65,6 +147,31 @@ export function SettingsPage() {
     saveAppNow({ ...appSettings, theme: mode });
     pushToast("已保存", "外观已更新", "success");
   };
+
+  // 在系统资源管理器中打开数据目录
+  const openDataFolder = async () => {
+    try {
+      await api.openDataDir();
+    } catch (e: any) {
+      pushToast("打开失败", e?.toString(), "error");
+    }
+  };
+
+  // —— 数据备份与恢复：弹窗选择位置由后端原生对话框完成，返回 null 表示取消 ——
+  const [backupBusy, setBackupBusy] = useState(false);
+  const runDataOp = async (op: () => Promise<string | null>, doneLabel: string) => {
+    setBackupBusy(true);
+    try {
+      const note = await op();
+      if (note) pushToast(doneLabel, note, "success");
+    } catch (e: any) {
+      pushToast("操作失败", e?.toString(), "error");
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+  const doBackup = () => runDataOp(api.backupData, "备份完成");
+  const doImport = () => runDataOp(api.importData, "导入完成");
 
   const toggleAutoStart = async (v: boolean) => {
     try {
@@ -117,7 +224,9 @@ export function SettingsPage() {
     persistApp(next);
   };
 
-  const detectOne = async (key: "trae" | "workbuddy" | "codebuddy_cn") => {
+  const detectOne = async (
+    key: "trae" | "workbuddy" | "workbuddy_ai" | "codebuddy_cn"
+  ) => {
     setDetecting(key);
     try {
       const paths = await api.detectClientPaths();
@@ -128,6 +237,8 @@ export function SettingsPage() {
             ? "client_path_trae"
             : key === "workbuddy"
             ? "client_path_workbuddy"
+            : key === "workbuddy_ai"
+            ? "client_path_workbuddy_ai"
             : "client_path_codebuddy_cn";
         const next = { ...appSettings, [field]: found };
         saveAppNow(next);
@@ -253,12 +364,44 @@ export function SettingsPage() {
         </div>
       </div>
 
+      <div className="gtitle">定时签到</div>
+      <div className="set-card">
+        <div className="set-row">
+          <div className="set-info">
+            <div className="set-name">平台范围</div>
+            <div className="set-desc">仅勾选的平台参与每日自动签到与超时补签</div>
+          </div>
+        </div>
+        {SCHED_PLATFORM_KEYS.map((key) => (
+          <div className="set-row" key={key}>
+            <div className="set-info">
+              <div className="set-name">{platformLabel(key)}</div>
+              <div className="set-desc">
+                {key === "workbuddy"
+                  ? "该平台账号参与定时签到（含 CodeBuddy CN）"
+                  : "该平台账号是否参与定时自动签到"}
+              </div>
+            </div>
+            <Switch
+              checked={scopeCurrent.includes(key)}
+              disabled={schedPlatforms === undefined}
+              onChange={(v) => toggleSchedPlatform(key, v)}
+            />
+          </div>
+        ))}
+      </div>
+
       <div className="gtitle">客户端路径</div>
       <div className="set-card">
         {(
           [
             { key: "trae", label: "TRAE", field: "client_path_trae" as const },
             { key: "workbuddy", label: "WorkBuddy", field: "client_path_workbuddy" as const },
+            {
+              key: "workbuddy_ai",
+              label: "WorkBuddy AI（国际版）",
+              field: "client_path_workbuddy_ai" as const,
+            },
             { key: "codebuddy_cn", label: "CodeBuddy CN", field: "client_path_codebuddy_cn" as const },
           ]
         ).map((c) => (
@@ -276,7 +419,9 @@ export function SettingsPage() {
               />
               <Button
                 disabled={detecting !== null}
-                onClick={() => detectOne(c.key as "trae" | "workbuddy" | "codebuddy_cn")}
+                onClick={() =>
+                  detectOne(c.key as "trae" | "workbuddy" | "workbuddy_ai" | "codebuddy_cn")
+                }
               >
                 <FolderSearch />
                 自动获取
@@ -284,6 +429,81 @@ export function SettingsPage() {
             </div>
           </div>
         ))}
+      </div>
+
+      <div className="gtitle">备份与恢复</div>
+      <div className="set-card">
+        <div className="set-row">
+          <div className="set-info">
+            <div className="set-name">备份数据</div>
+            <div className="set-desc">导出数据库与授权会话，弹窗选择保存位置</div>
+          </div>
+          <Button disabled={backupBusy} onClick={doBackup}>
+            <HardDriveDownload />
+            备份数据
+          </Button>
+        </div>
+        <div className="set-row">
+          <div className="set-info">
+            <div className="set-name">导入数据</div>
+            <div className="set-desc">从备份文件夹恢复并覆盖现有数据，建议恢复后重启</div>
+          </div>
+          <Button disabled={backupBusy} onClick={doImport}>
+            <HardDriveUpload />
+            导入数据
+          </Button>
+        </div>
+      </div>
+
+      <div className="gtitle">关于与更新</div>
+      <div className="set-card">
+        <div className="set-row">
+          <div className="set-info">
+            <div className="set-name">存储位置</div>
+            <div className="set-desc data-dir">{dataDir || "…"}</div>
+          </div>
+          <Button onClick={openDataFolder}>
+            <FolderOpen />
+            打开文件夹
+          </Button>
+        </div>
+        <div className="set-row">
+          <div className="set-info">
+            <div className="set-name">
+              当前版本{currentVer ? ` v${currentVer}` : ""}
+              {phase === "available" ? ` · 发现新版本 v${newVer}` : ""}
+            </div>
+            <div className="set-desc">
+              {phase === "idle" && "应用启动时会自动检查更新，也可在此手动检查"}
+              {phase === "checking" && "正在检查更新…"}
+              {phase === "available" && "下载完成后重启应用即可完成升级"}
+              {phase === "downloading" && `正在下载更新… ${progress}%`}
+              {phase === "ready" && "更新包已安装，重启应用后生效"}
+              {phase === "latest" && "当前已是最新版本"}
+              {phase === "error" && errMsg}
+            </div>
+            {phase === "downloading" && <Meter value={progress} small />}
+          </div>
+          {phase === "ready" ? (
+            <Button variant="pri" onClick={relaunchApp}>
+              <RotateCcw />
+              重启应用
+            </Button>
+          ) : phase === "available" ? (
+            <Button variant="pri" onClick={installUpdate}>
+              <Download />
+              下载并安装
+            </Button>
+          ) : (
+            <Button
+              disabled={phase === "checking" || phase === "downloading"}
+              onClick={checkUpdate}
+            >
+              <RefreshCw className={phase === "checking" ? "spin" : ""} />
+              检查更新
+            </Button>
+          )}
+        </div>
       </div>
     </div>
   );

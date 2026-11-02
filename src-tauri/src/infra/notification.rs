@@ -47,6 +47,12 @@ impl Notifier {
         }
     }
 
+    /// 签到数据变更信号（定时签到/超时补签完成）：
+    /// 与通知模式无关，始终发前端事件驱动总览等页面刷新
+    pub fn emit_checkin_done(&self) {
+        let _ = self.app.emit("checkin-done", ());
+    }
+
     async fn send_toast(&self, title: &str, body: &str) {
         let payload = serde_json::json!({
             "title": title,
@@ -93,8 +99,8 @@ impl Notifier {
 #[cfg(windows)]
 pub fn register_windows_app_id(app_id: &str, display_name: &str) {
     use std::os::windows::process::CommandExt;
-    use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
     use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 
     let wide: Vec<u16> = app_id.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
@@ -105,7 +111,15 @@ pub fn register_windows_app_id(app_id: &str, display_name: &str) {
     let key = format!("HKCU\\Software\\Classes\\AppUserModelId\\{}", app_id);
     let _ = std::process::Command::new("reg")
         .args([
-            "add", &key, "/v", "DisplayName", "/t", "REG_SZ", "/d", display_name, "/f",
+            "add",
+            &key,
+            "/v",
+            "DisplayName",
+            "/t",
+            "REG_SZ",
+            "/d",
+            display_name,
+            "/f",
         ])
         .creation_flags(CREATE_NO_WINDOW)
         .output();

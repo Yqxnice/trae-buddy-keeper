@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 export interface CreditExpiry {
   at: number;
   amount: number;
+  /** 积分包名称（TRAE 回填；WorkBuddy 为空） */
+  name?: string;
 }
 
 export interface AccountInfo {
@@ -21,6 +23,8 @@ export interface AccountInfo {
   credits_balance: number | null;
   credits_expiries: CreditExpiry[];
   credits_fetched_at: number;
+  /** 账号域名（WorkBuddy 国内/国际按此后缀区分：含 workbuddy.ai 即国际版） */
+  domain?: string;
   /** 当前账户已注入的客户端（trae / workbuddy / codebuddy_cn） */
   clients?: string[];
 }
@@ -101,6 +105,8 @@ export interface CheckinSettings {
   cooldown_minutes: number;
   max_fail_count: number;
   interval_seconds: number;
+  /** 定时签到平台范围；空数组 = 全部平台 */
+  platforms: string[];
 }
 
 export const api = {
@@ -142,10 +148,10 @@ export const api = {
   stopTraeOauth: () => invoke<void>("stop_trae_oauth"),
   completeTraeOauth: (callbackUrl: string, name?: string) =>
     invoke<string>("complete_trae_oauth", { callbackUrl, name: name ?? null }),
-  startWorkbuddyLogin: () =>
-    invoke<{ state: string; authUrl: string }>("start_workbuddy_login"),
-  pollWorkbuddyLogin: (loginState: string) =>
-    invoke<{ status: string; name: string }>("poll_workbuddy_login", { loginState }),
+  startWorkbuddyLogin: (variant: WbVariant = "cn") =>
+    invoke<{ state: string; authUrl: string }>("start_workbuddy_login", { variant }),
+  pollWorkbuddyLogin: (loginState: string, variant: WbVariant = "cn") =>
+    invoke<{ status: string; name: string }>("poll_workbuddy_login", { loginState, variant }),
   switchAccount: (id: string) => invoke<string>("switch_account", { id }),
   switchWorkbuddyClient: (id: string) =>
     invoke<string>("switch_workbuddy_client", { id }),
@@ -168,13 +174,17 @@ export const api = {
 
   // ===== 通用设置 =====
   getAppSettings: () => invoke<AppSettings>("get_app_settings"),
+  getDataDir: () => invoke<string>("get_data_dir"),
+  openDataDir: () => invoke<void>("open_data_dir"),
+  backupData: () => invoke<string | null>("backup_data"),
+  importData: () => invoke<string | null>("import_data"),
   setAppSettings: (settings: AppSettings) =>
     invoke<void>("set_app_settings", { settings }),
   detectClientPaths: () => invoke<ClientPaths>("detect_client_paths"),
 
   // ===== Token 统计 =====
-  getTokenStatistics: (days?: number) =>
-    invoke<TokenStatistics>("get_token_statistics", days ? { days } : undefined),
+  getTokenStatistics: (days?: number, force = false) =>
+    invoke<TokenStatistics>("get_token_statistics", { days: days ?? null, force }),
 };
 
 export interface AppSettings {
@@ -184,14 +194,19 @@ export interface AppSettings {
   theme: string;
   client_path_trae: string;
   client_path_workbuddy: string;
+  client_path_workbuddy_ai: string;
   client_path_codebuddy_cn: string;
 }
 
 export interface ClientPaths {
   trae: string;
   workbuddy: string;
+  workbuddy_ai: string;
   codebuddy_cn: string;
 }
+
+/** WorkBuddy 档位：国内版 cn / 国际版 ai */
+export type WbVariant = "cn" | "ai";
 
 // ===== Token 统计 =====
 
@@ -226,6 +241,10 @@ export interface TokenStatsSource {
   parseErrors: number;
   coverageStartAt: number | null;
   coverageEndAt: number | null;
+  /** 云端源（trae）专用：中性提示（未添加账号 / 回溯上限） */
+  notice?: string | null;
+  /** 云端源（trae）专用：按账号拉取失败的汇总 */
+  errors?: string | null;
 }
 
 export interface TokenStatistics {

@@ -1,19 +1,24 @@
 use serde::Serialize;
 
-/// 三个客户端的本地安装路径（未安装为空字符串）
+/// 四个客户端的本地安装路径（未安装为空字符串）
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ClientPaths {
     pub trae: String,
     pub workbuddy: String,
+    pub workbuddy_ai: String,
     pub codebuddy_cn: String,
 }
 
-/// 按 DisplayName 匹配卸载项：TRAE/TRAE CN、WorkBuddy（排除 Manager）、CodeBuddy CN/CodeBuddy
+/// 按 DisplayName 匹配卸载项：TRAE/TRAE CN、WorkBuddy（排除 Manager）、
+/// WorkBuddy AI（国际版客户端，须先于 WorkBuddy 判定）、CodeBuddy CN/CodeBuddy
 fn classify(display_name: &str) -> Option<&'static str> {
     let n = display_name.trim();
     let lower = n.to_lowercase();
     if lower.starts_with("trae") {
         return Some("trae");
+    }
+    if lower.starts_with("workbuddy ai") {
+        return Some("workbuddy_ai");
     }
     if lower.starts_with("workbuddy") && !lower.contains("manager") {
         return Some("workbuddy");
@@ -71,10 +76,13 @@ fn detect_from_registry() -> ClientPaths {
             .get("DisplayName")
             .and_then(|s| s.as_str())
             .unwrap_or("");
-        let Some(client) = classify(name) else { continue };
+        let Some(client) = classify(name) else {
+            continue;
+        };
         let done = match client {
             "trae" => !out.trae.is_empty(),
             "workbuddy" => !out.workbuddy.is_empty(),
+            "workbuddy_ai" => !out.workbuddy_ai.is_empty(),
             _ => !out.codebuddy_cn.is_empty(),
         };
         if done {
@@ -111,6 +119,7 @@ fn detect_from_registry() -> ClientPaths {
             match client {
                 "trae" => out.trae = path,
                 "workbuddy" => out.workbuddy = path,
+                "workbuddy_ai" => out.workbuddy_ai = path,
                 _ => out.codebuddy_cn = path,
             }
         }

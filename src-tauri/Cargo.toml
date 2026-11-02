@@ -1,13 +1,13 @@
 [package]
-name = "ai-manager"
+name = "trae-buddy-keeper"
 version = "0.1.0"
-description = "AI 账户管家 - TRAE & WorkBuddy 签到管理"
+description = "TraeBuddy Keeper - TRAE & WorkBuddy 签到管理"
 authors = ["you"]
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.82"
 
 [lib]
-name = "ai_manager_lib"
+name = "trae_buddy_keeper_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -17,11 +17,14 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 reqwest = { version = "0.12", features = ["json", "cookies"] }
+rfd = "0.15"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 thiserror = "1"

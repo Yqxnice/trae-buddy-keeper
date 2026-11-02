@@ -16,7 +16,9 @@ export function formatRelative(ts: number): string {
 }
 
 export function platformLabel(p: string): string {
-  return p === "trae" ? "TRAE" : "WorkBuddy";
+  if (p === "trae") return "TRAE";
+  if (p === "codebuddy_cn") return "CodeBuddy CN";
+  return "WorkBuddy";
 }
 
 // 签到日边界：本地时间每天 06:00（与后端 checked_in_today 一致）

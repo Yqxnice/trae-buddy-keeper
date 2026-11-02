@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::data::models::Account;
 
-const TRAE_BASE: &str = "https://api.trae.cn";
+pub(crate) const TRAE_BASE: &str = "https://api.trae.cn";
 const TRAE_ORIGIN: &str = "https://www.trae.cn";
 // 与网页授权登录一致的 SOLO 客户端标识（刷新按 ClientID 匹配，错配会被拒）
 const SOLO_CLIENT_ID: &str = "en1oxy7wnw8j9n";
@@ -45,7 +45,12 @@ fn ug_authed(
         .header("x-app-version", SOLO_APP_VERSION)
 }
 
-fn authed(client: &Client, url: &str, access_token: &str, device_id: &str) -> reqwest::RequestBuilder {
+pub(crate) fn authed(
+    client: &Client,
+    url: &str,
+    access_token: &str,
+    device_id: &str,
+) -> reqwest::RequestBuilder {
     let mut req = client
         .post(url)
         // 上游认 Cloud-IDE-JWT 方案，Bearer 会被判为未认证（code=1001）
@@ -62,8 +67,12 @@ fn authed(client: &Client, url: &str, access_token: &str, device_id: &str) -> re
     req
 }
 
-/// 签到状态：(今日已签到, 活动是否开启)
-pub async fn checkin_status(client: &Client, access_token: &str, device_id: &str) -> Result<(bool, bool)> {
+/// 签到状态：(今日已签到, 活动是否开启, 累计签到积分(响应携带时))
+pub async fn checkin_status(
+    client: &Client,
+    access_token: &str,
+    device_id: &str,
+) -> Result<(bool, bool, Option<i64>)> {
     let url = format!("{}/trae/api/v2/ug/checkin_credits/status", TRAE_BASE);
     let resp = ug_authed(client, &url, access_token, device_id)
         .body(UG_REQ_BODY)
@@ -94,11 +103,52 @@ pub async fn checkin_status(client: &Client, access_token: &str, device_id: &str
                 .and_then(|c| c.as_bool())
         })
         .unwrap_or(false);
-    let enabled = v
-        .get("enable")
-        .and_then(|e| e.as_bool())
-        .unwrap_or(true);
-    Ok((claimed, enabled))
+    let enabled = v.get("enable").and_then(|e| e.as_bool()).unwrap_or(true);
+    // 累计签到积分：深度扫描 credit 类数值字段（响应形态未公开，做多形态兜底）
+    let credits = scan_credit_number(&v, 0);
+    Ok((claimed, enabled, credits))
+}
+
+/// 深度扫描签到响应 JSON 中的积分数字：字段名含 credit/point/reward/grant/bonus/amount
+/// 的数值（含数字字符串），跳过 code/时间戳/上限等已知非奖励字段；未命中再深入子对象。
+/// claim 响应携带的通常是「本次奖励」，status 响应携带的通常是「累计值」。
+fn scan_credit_number(v: &Value, depth: usize) -> Option<i64> {
+    if depth > 5 {
+        return None;
+    }
+    const SKIPS: [&str; 8] = ["code", "message", "expire", "time", "date", "limit", "status", "id"];
+    const HINTS: [&str; 6] = ["credit", "point", "reward", "grant", "bonus", "amount"];
+    match v {
+        Value::Object(m) => {
+            for (k, val) in m {
+                let kl = k.to_lowercase();
+                if SKIPS.iter().any(|s| kl.contains(s)) {
+                    continue;
+                }
+                if HINTS.iter().any(|h| kl.contains(h)) {
+                    let n = match val {
+                        Value::Number(n) => n.as_i64(),
+                        Value::String(s) => s.trim().parse::<i64>().ok(),
+                        Value::Object(_) => scan_credit_number(val, depth + 1),
+                        _ => None,
+                    };
+                    if n.is_some() {
+                        return n;
+                    }
+                }
+            }
+            for val in m.values() {
+                if val.is_object() {
+                    let n = scan_credit_number(val, depth + 1);
+                    if n.is_some() {
+                        return n;
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 pub async fn checkin_claim(client: &Client, access_token: &str, device_id: &str) -> Result<i64> {
@@ -126,11 +176,8 @@ pub async fn checkin_claim(client: &Client, access_token: &str, device_id: &str)
             .to_string();
         return Err(anyhow!("TRAE claim 业务错误: code={} msg={}", code, msg));
     }
-    let points = v
-        .get("data")
-        .and_then(|d| d.get("credits").and_then(|c| c.as_i64()).or_else(|| d.get("points").and_then(|p| p.as_i64())))
-        .or_else(|| v.get("credits").and_then(|c| c.as_i64()))
-        .unwrap_or(0);
+    // 积分数额：响应形态未公开，深度扫描多形态兜底（data.credits / data.points / 数字字符串等）
+    let points = scan_credit_number(&v, 0).unwrap_or(0);
     Ok(points)
 }
 
@@ -143,15 +190,20 @@ fn claim_retryable(err: &anyhow::Error) -> bool {
     let msg = err.to_string();
     msg.contains("code=10001")
         || msg.contains(" 50")
-            && (msg.contains(" 500") || msg.contains(" 502") || msg.contains(" 503") || msg.contains(" 504"))
+            && (msg.contains(" 500")
+                || msg.contains(" 502")
+                || msg.contains(" 503")
+                || msg.contains(" 504"))
 }
 
 /// device_id：签到按设备维度幂等（did_checked_in），用调用方持有的稳定设备 id
 pub async fn do_checkin(acc: &Account, device_id: &str) -> Result<(bool, i64, String)> {
     let client = Client::new();
-    // 先查状态
+    // 先查状态；记录领取前累计积分（如响应提供），领取后做差可得本次奖励
+    let before_credits;
     match checkin_status(&client, &acc.access_token, device_id).await {
-        Ok((claimed, enabled)) => {
+        Ok((claimed, enabled, credits)) => {
+            before_credits = credits;
             if claimed {
                 return Ok((true, 0, "今日已签到".to_string()));
             }
@@ -179,16 +231,25 @@ pub async fn do_checkin(acc: &Account, device_id: &str) -> Result<(bool, i64, St
             // claim 的 code=0 可能是假成功：当日已签的账号对任意设备号都会回 0。
             // 只有用同一设备号回查 checked_in 翻转，才算真正领到。
             match checkin_status(&client, &acc.access_token, device_id).await {
-                Ok((true, _)) => Ok((
-                    true,
-                    points,
-                    if points > 0 {
-                        format!("签到成功 +{}", points)
+                Ok((true, _, after_credits)) => {
+                    // claim 响应未携带奖励数额时，用领取前后累计积分差值兜底
+                    // （免费账号每日 100、会员 200 由上游判定，这里如实显示）
+                    let earned = if points > 0 {
+                        points
                     } else {
-                        "签到成功".to_string()
-                    },
-                )),
-                Ok((false, _)) => Ok((
+                        (after_credits.unwrap_or(0) - before_credits.unwrap_or(0)).max(0)
+                    };
+                    Ok((
+                        true,
+                        earned,
+                        if earned > 0 {
+                            format!("签到成功 +{}", earned)
+                        } else {
+                            "签到成功".to_string()
+                        },
+                    ))
+                }
+                Ok((false, _, _)) => Ok((
                     false,
                     0,
                     "领取接口返回成功，但同设备号回查未确认，稍后自动重试".to_string(),
@@ -217,10 +278,56 @@ pub async fn verify_token(access_token: &str, device_id: &str) -> Result<bool> {
     Ok(v.get("code").and_then(|c| c.as_i64()).unwrap_or(0) == 0)
 }
 
+/// 查询资格包过期记录（/trae/api/v2/pay/expired_ents，只读）。
+/// 返回 (到期秒, 包总额, 包名)；临期与已过期都在列表里，调用方自行取舍。
+/// 仅用于给积分包明细补充名称，失败不影响余额查询主流程。
+async fn fetch_expired_ents(
+    client: &Client,
+    access_token: &str,
+) -> Result<Vec<(i64, f64, String)>, String> {
+    let url = format!("{TRAE_BASE}/trae/api/v2/pay/expired_ents");
+    let resp = authed(client, &url, access_token, "")
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("查询失败: {status}"));
+    }
+    let v: Value = serde_json::from_str(&text).map_err(|e| format!("响应解析失败: {e}"))?;
+    let mut out = Vec::new();
+    if let Some(list) = v.get("expired_ent_list").and_then(Value::as_array) {
+        for e in list {
+            let name = e
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let limit = e
+                .get("credits_limit")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            let ms = e
+                .get("expire_time_ms")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0) as i64;
+            let at = if ms > 1_000_000_000_000 { ms / 1000 } else { ms };
+            if at > 0 && (!name.is_empty() || limit > 0.0) {
+                out.push((at, limit, name));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// TRAE 真实积分：POST /trae/api/v2/pay/web_user_ent_usage（只读）。
 /// 返回 (总余额, 到期列表)。积分包：credits_limit - usage.credits_amount 为剩余，
 /// entitlement_base_info.end_time 为到期（epoch 秒）。
-pub async fn fetch_credits(acc: &Account) -> Result<(f64, Vec<crate::data::models::CreditExpiry>), String> {
+pub async fn fetch_credits(
+    acc: &Account,
+) -> Result<(f64, Vec<crate::data::models::CreditExpiry>), String> {
     if acc.access_token.trim().is_empty() {
         return Err("该账号无 access_token".to_string());
     }
@@ -247,11 +354,28 @@ pub async fn fetch_credits(acc: &Account) -> Result<(f64, Vec<crate::data::model
     }
 
     let num = |v: &Value, key: &str| v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0);
+    // 临期包名称映射（到期秒 → 包名）；查询失败只影响名称展示，不阻断余额主流程
+    let names: std::collections::HashMap<i64, String> =
+        match fetch_expired_ents(&client, acc.access_token.trim()).await {
+            Ok(list) => list
+                .into_iter()
+                .map(|(at, _, name)| (at, name))
+                .collect(),
+            Err(_) => Default::default(),
+        };
     let mut total = 0.0_f64;
     let mut expiries = Vec::new();
-    if let Some(packs) = v.get("user_entitlement_pack_list").and_then(|p| p.as_array()) {
+    let mut packs_empty = false;
+    if let Some(packs) = v
+        .get("user_entitlement_pack_list")
+        .and_then(|p| p.as_array())
+    {
+        packs_empty = packs.is_empty();
         for p in packs {
-            let base = p.get("entitlement_base_info").cloned().unwrap_or(Value::Null);
+            let base = p
+                .get("entitlement_base_info")
+                .cloned()
+                .unwrap_or(Value::Null);
             let limit = base
                 .get("product_extra")
                 .and_then(|e| e.get("package_extra"))
@@ -273,9 +397,17 @@ pub async fn fetch_credits(acc: &Account) -> Result<(f64, Vec<crate::data::model
             total += remain;
             // end_time 是 epoch 秒；毫秒量级（>1e12）则直接保留
             let end = num(&base, "end_time") as i64;
-            let at = if end > 1_000_000_000_000 { end / 1000 } else { end };
+            let at = if end > 1_000_000_000_000 {
+                end / 1000
+            } else {
+                end
+            };
             if remain > 0.0 && at > 0 {
-                expiries.push(crate::data::models::CreditExpiry { at, amount: remain });
+                expiries.push(crate::data::models::CreditExpiry {
+                    name: names.get(&at).cloned().unwrap_or_default(),
+                    at,
+                    amount: remain,
+                });
             }
         }
     }
@@ -284,6 +416,11 @@ pub async fn fetch_credits(acc: &Account) -> Result<(f64, Vec<crate::data::model
         if let Some(s) = v.get("usage_summary") {
             total = num(s, "total_amount") - num(s, "consumed_amount");
         }
+    }
+    // 防清零：包列表为空且汇总也拿不到数值，多半是未登录/风控的异常结构，
+    // 报错让调用方保留库中旧余额，而不是把界面余额写成 0
+    if packs_empty && total == 0.0 {
+        return Err("积分包列表为空，可能会话失效".into());
     }
     expiries.sort_by_key(|e| e.at);
     Ok((total.max(0.0), expiries))
@@ -370,7 +507,10 @@ fn device_proof(secret_hex: &str, path: &str, client_id: &str, refresh: &str) ->
         .map_err(|e| anyhow!("设备密钥无法还原: {e}"))?;
     let ts = chrono::Utc::now().timestamp();
     let nonce = uuid::Uuid::new_v4().simple().to_string();
-    let text = format!("POST\n{}\n{}\n{}\n{}\n{}", path, client_id, refresh, ts, nonce);
+    let text = format!(
+        "POST\n{}\n{}\n{}\n{}\n{}",
+        path, client_id, refresh, ts, nonce
+    );
     let sig: p256::ecdsa::Signature = key.sign(text.as_bytes());
     let der = sig.to_der();
     Ok(serde_json::json!({

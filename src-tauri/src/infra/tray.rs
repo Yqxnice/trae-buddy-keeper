@@ -11,7 +11,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&show, &checkin, &quit])?;
 
     let _tray = TrayIconBuilder::with_id("main-tray")
-        .tooltip("AI 账户管家")
+        .tooltip("TraeBuddy Keeper")
         .icon(app.default_window_icon().unwrap().clone())
         .menu(&menu)
         .show_menu_on_left_click(false)

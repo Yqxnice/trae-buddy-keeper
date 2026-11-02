@@ -157,9 +157,9 @@ fn usage_fields(object: &Map<String, Value>) -> Usage {
 }
 
 fn usage_object(value: Option<&Value>) -> Option<&Map<String, Value>> {
-    value?.as_object().filter(|object| {
-        field(object, &["input_tokens", "inputTokens", "prompt_tokens"]).is_some()
-    })
+    value?
+        .as_object()
+        .filter(|object| field(object, &["input_tokens", "inputTokens", "prompt_tokens"]).is_some())
 }
 
 /// 解码一条记录。Usage 优先级：message.usage > providerData.usage > 顶层 usage。
@@ -934,4 +934,38 @@ pub fn get_statistics(days: Option<i64>) -> Value {
             ),
         ],
     })
+}
+
+// ---------- TRAE 云端用量源 ----------
+
+/// TRAE 云端用量（第四个 source）：数据来自服务端接口而非本地日志，
+/// 由调用方（lib.rs）按 TRAE 账号拉取后传入。items 为
+/// (项目名＝账号名, 合成记录)，记录由 trae::usage::UsageSession::to_stats_record 生成。
+pub fn trae_cloud_source(
+    items: Vec<(String, Value)>,
+    accounts: usize,
+    notice: Option<&str>,
+    errors: Option<&str>,
+) -> Value {
+    let mut collector = SourceCollector::default();
+    for (project, value) in &items {
+        let Some(usage) = usage(value) else {
+            continue;
+        };
+        // 云端每条记录本身就是一个会话，单独累计该会话的用量
+        let mut session_totals = Totals::default();
+        session_totals.add(usage);
+        collector.add(usage, value, project);
+        let session_id =
+            non_empty_text(value.get("sessionId")).unwrap_or_else(|| "未知会话".to_string());
+        collector.push_session(session_id, non_empty_text(value.get("title")), project.clone(), session_totals);
+    }
+    let mut value = collector.into_value("trae", accounts);
+    if let Some(notice) = notice {
+        value["notice"] = json!(notice);
+    }
+    if let Some(errors) = errors {
+        value["errors"] = json!(errors);
+    }
+    value
 }

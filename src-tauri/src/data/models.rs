@@ -14,12 +14,6 @@ impl Platform {
             Platform::Workbuddy => "workbuddy",
         }
     }
-    pub fn from_str(s: &str) -> Self {
-        match s {
-            "workbuddy" => Platform::Workbuddy,
-            _ => Platform::Trae,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,7 +36,7 @@ impl CheckinStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Account {
     pub id: String,
     pub platform: String,
@@ -85,6 +79,9 @@ pub struct Account {
 pub struct CreditExpiry {
     pub at: i64,
     pub amount: f64,
+    /// 积分包名称（TRAE 用 expired_ents 按到期时间匹配回填；WorkBuddy 为空）
+    #[serde(default)]
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +231,8 @@ pub struct AppSettings {
     pub theme: String, // light | dark | system
     pub client_path_trae: String,
     pub client_path_workbuddy: String,
+    #[serde(default)]
+    pub client_path_workbuddy_ai: String,
     pub client_path_codebuddy_cn: String,
 }
 
@@ -245,6 +244,7 @@ impl Default for AppSettings {
             theme: "light".to_string(),
             client_path_trae: String::new(),
             client_path_workbuddy: String::new(),
+            client_path_workbuddy_ai: String::new(),
             client_path_codebuddy_cn: String::new(),
         }
     }
@@ -263,6 +263,9 @@ pub struct CheckinSettings {
     pub cooldown_minutes: u32,
     pub max_fail_count: u32,
     pub interval_seconds: u32,
+    /// 定时签到平台范围（trae / workbuddy / codebuddy_cn）；空 = 全部平台
+    #[serde(default)]
+    pub platforms: Vec<String>,
 }
 
 impl Default for CheckinSettings {
@@ -274,6 +277,7 @@ impl Default for CheckinSettings {
             cooldown_minutes: 30,
             max_fail_count: 3,
             interval_seconds: 3,
+            platforms: Vec::new(),
         }
     }
 }

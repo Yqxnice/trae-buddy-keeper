@@ -82,7 +82,7 @@ fn dpapi_decrypt(encrypted: &[u8]) -> Result<Vec<u8>, String> {
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
     unsafe {
-        let mut data_in = CRYPT_INTEGER_BLOB {
+        let data_in = CRYPT_INTEGER_BLOB {
             cbData: encrypted.len() as u32,
             pbData: encrypted.as_ptr() as *mut u8,
         };
@@ -90,7 +90,7 @@ fn dpapi_decrypt(encrypted: &[u8]) -> Result<Vec<u8>, String> {
             cbData: 0,
             pbData: std::ptr::null_mut(),
         };
-        CryptUnprotectData(&mut data_in, None, None, None, None, 0, &mut data_out)
+        CryptUnprotectData(&data_in, None, None, None, None, 0, &mut data_out)
             .map_err(|e| format!("DPAPI CryptUnprotectData 失败: {e}"))?;
         if data_out.pbData.is_null() || data_out.cbData == 0 {
             return Err("DPAPI 返回空数据".to_string());
@@ -107,7 +107,8 @@ fn encryption_key(db_path: &Path) -> Result<Vec<u8>, String> {
     use base64::Engine as _;
     let text = std::fs::read_to_string(local_state_path(db_path)?)
         .map_err(|e| format!("读取 Local State 失败: {e}"))?;
-    let v: Value = serde_json::from_str(&text).map_err(|e| format!("解析 Local State 失败: {e}"))?;
+    let v: Value =
+        serde_json::from_str(&text).map_err(|e| format!("解析 Local State 失败: {e}"))?;
     let b64 = v["os_crypt"]["encrypted_key"]
         .as_str()
         .ok_or("Local State 缺少 os_crypt.encrypted_key")?;
@@ -207,8 +208,8 @@ fn inject_session(plaintext: &str) -> Result<PathBuf, String> {
     let encrypted = encrypt_v10(&key, plaintext.as_bytes())?;
     let buffer_str = json!({"type": "Buffer", "data": encrypted}).to_string();
 
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("打开 state.vscdb 失败: {e}"))?;
+    let conn =
+        rusqlite::Connection::open(&db_path).map_err(|e| format!("打开 state.vscdb 失败: {e}"))?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value TEXT)",
         [],

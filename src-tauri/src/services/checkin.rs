@@ -19,6 +19,13 @@ fn is_aha_device(s: &str) -> bool {
     matches!(s.len(), 12..=20) && s.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// 平台范围匹配：勾选 workbuddy 时同时覆盖 codebuddy_cn（同一账号体系）
+fn platform_in_scope(platform: &str, scope: &[String]) -> bool {
+    scope
+        .iter()
+        .any(|p| p == platform || (p == "workbuddy" && platform == "codebuddy_cn"))
+}
+
 /// 由种子派生 16 位设备号：同一种子恒定；换号时换盐即可得到新号
 fn derived_device_id(seed: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -60,6 +67,22 @@ impl CheckinService {
             .ok_or_else(|| "账户不存在".to_string())?;
 
         let now = Utc::now().timestamp();
+        // 0) WorkBuddy 国际版没有签到接口：入口直接跳过，不发请求、不落签到记录，
+        //    也不计入「今天是否全部已签到」的待签集合
+        if acc.platform == "workbuddy"
+            && crate::platform::workbuddy::variant::variant_of(&acc)
+                == crate::platform::workbuddy::variant::WbVariant::Ai
+        {
+            return Ok(CheckinResult {
+                account_id: acc.id.clone(),
+                account_name: acc.name.clone(),
+                platform: acc.platform.clone(),
+                success: false,
+                skipped: true,
+                points: 0,
+                message: "WorkBuddy 国际版无签到，已跳过".to_string(),
+            });
+        }
         // 统一自动跳过：所有入口（手动单个/批量勾选/定时/补签）都在这里收敛，
         // 命中后不再请求上游，也不会记失败
         // 1) 凭证已失效
@@ -200,7 +223,11 @@ impl CheckinService {
     }
 
     // 批量签到（可按平台过滤）
-    pub async fn checkin_all(&self, platform: Option<&str>) -> Result<Vec<CheckinResult>, String> {
+    /// 批量签到；platforms 为 None 时签到全部平台，否则仅签到范围内的平台
+    pub async fn checkin_all(
+        &self,
+        platforms: Option<&[String]>,
+    ) -> Result<Vec<CheckinResult>, String> {
         let mut lock = self.running.lock().await;
         if *lock {
             return Err("已有签到任务在执行中".to_string());
@@ -209,22 +236,31 @@ impl CheckinService {
         drop(lock);
 
         let mut accounts = self.db.list_accounts().map_err(|e| e.to_string())?;
-        if let Some(p) = platform {
-            accounts.retain(|a| a.platform == p);
+        // 国际版无签到接口，不进批量签到队列
+        accounts.retain(|a| {
+            a.platform != "workbuddy"
+                || crate::platform::workbuddy::variant::variant_of(a)
+                    != crate::platform::workbuddy::variant::WbVariant::Ai
+        });
+        if let Some(ps) = platforms {
+            accounts.retain(|a| platform_in_scope(&a.platform, ps));
         }
         let settings = load_checkin_settings(&self.db);
         let mut results = Vec::new();
 
         for acc in &accounts {
-            let r = self.checkin_one(&acc.id).await.unwrap_or_else(|e| CheckinResult {
-                account_id: acc.id.clone(),
-                account_name: acc.name.clone(),
-                platform: acc.platform.clone(),
-                success: false,
-                skipped: false,
-                points: 0,
-                message: e,
-            });
+            let r = self
+                .checkin_one(&acc.id)
+                .await
+                .unwrap_or_else(|e| CheckinResult {
+                    account_id: acc.id.clone(),
+                    account_name: acc.name.clone(),
+                    platform: acc.platform.clone(),
+                    success: false,
+                    skipped: false,
+                    points: 0,
+                    message: e,
+                });
             let skipped = r.skipped;
             results.push(r);
             // 自动跳过的账号没有发请求，不必再等间隔
@@ -285,7 +321,13 @@ impl CheckinService {
     }
 
     /// 换一个没被其它账号占用、本轮也没试过的全新设备号
-    fn fresh_device_id(&self, acc: &Account, prev: &str, attempt: usize, tried: &HashSet<String>) -> String {
+    fn fresh_device_id(
+        &self,
+        acc: &Account,
+        prev: &str,
+        attempt: usize,
+        tried: &HashSet<String>,
+    ) -> String {
         let others: HashSet<String> = self
             .db
             .list_accounts()
@@ -406,11 +448,26 @@ impl CheckinService {
     }
 
     // 超时补签到：检查今天是否有账户未签到
-    pub async fn retry_missed(&self, platform: Option<&str>) -> Result<Vec<CheckinResult>, String> {
+    /// 补签当日未签到的账号；platforms 为 None 时覆盖全部平台
+    pub async fn retry_missed(
+        &self,
+        platforms: Option<&[String]>,
+    ) -> Result<Vec<CheckinResult>, String> {
         let accounts = self.db.list_accounts().map_err(|e| e.to_string())?;
         let accounts: Vec<_> = accounts
             .into_iter()
-            .filter(|a| platform.map(|p| a.platform == p).unwrap_or(true))
+            .filter(|a| {
+                // 国际版无签到接口，不参与补签
+                if a.platform == "workbuddy"
+                    && crate::platform::workbuddy::variant::variant_of(a)
+                        == crate::platform::workbuddy::variant::WbVariant::Ai
+                {
+                    return false;
+                }
+                platforms
+                    .map(|ps| platform_in_scope(&a.platform, ps))
+                    .unwrap_or(true)
+            })
             .collect();
         let now = Utc::now().timestamp();
         let mut results = Vec::new();
@@ -427,7 +484,10 @@ impl CheckinService {
                         continue;
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(settings.interval_seconds as u64)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    settings.interval_seconds as u64,
+                ))
+                .await;
             }
         }
         Ok(results)
@@ -458,18 +518,23 @@ fn checked_in_today(last_checkin: i64) -> bool {
 
 fn today_str() -> String {
     let now = Local::now();
-    format!(
-        "{:04}-{:02}-{:02}",
-        now.year(),
-        now.month(),
-        now.day()
-    )
+    format!("{:04}-{:02}-{:02}", now.year(), now.month(), now.day())
 }
 
 pub fn load_checkin_settings(db: &Database) -> CheckinSettings {
     let json = db.get_setting("checkin_settings").unwrap_or(None);
     match json {
-        Some(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Some(s) => {
+            let mut cfg: CheckinSettings = serde_json::from_str(&s).unwrap_or_default();
+            // 历史配置兼容：codebuddy_cn 已归入 workbuddy 范围（同一账号体系）
+            if cfg.platforms.iter().any(|p| p == "codebuddy_cn") {
+                cfg.platforms.retain(|p| p != "codebuddy_cn");
+                if !cfg.platforms.iter().any(|p| p == "workbuddy") {
+                    cfg.platforms.push("workbuddy".to_string());
+                }
+            }
+            cfg
+        }
         None => CheckinSettings::default(),
     }
 }

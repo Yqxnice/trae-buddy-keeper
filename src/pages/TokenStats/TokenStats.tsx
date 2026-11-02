@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { RefreshCw } from "lucide-react";
 import {
   Area,
@@ -22,13 +22,21 @@ import { api, type TokenStatistics, type TokenStatsSource } from "@/lib/api";
 import { useUIStore } from "@/stores/ui";
 import "./TokenStats.css";
 
-type SourceKey = "workbuddy" | "workbuddy-ai" | "codebuddy-ide";
+type SourceKey = "workbuddy" | "workbuddy-ai" | "codebuddy-ide" | "trae";
 type RangeKey = "0" | "7" | "30" | "90";
 
 const SOURCE_LABELS: Record<SourceKey, string> = {
   workbuddy: "WorkBuddy",
   "workbuddy-ai": "WorkBuddy 国际版",
   "codebuddy-ide": "CodeBuddy IDE",
+  trae: "TRAE 云端",
+};
+
+const EMPTY_TEXT: Record<SourceKey, string> = {
+  workbuddy: "暂无 WorkBuddy 的本地日志数据",
+  "workbuddy-ai": "暂无 WorkBuddy 国际版的本地日志数据",
+  "codebuddy-ide": "暂无 CodeBuddy IDE 的本地日志数据",
+  trae: "暂无 TRAE 云端用量数据",
 };
 
 const RANGE_OPTIONS: { value: RangeKey; label: string }[] = [
@@ -164,29 +172,48 @@ function PieTooltip({
 
 export function TokenStatsPage() {
   const pushToast = useUIStore((s) => s.pushToast);
+  const platform = useUIStore((s) => s.platform);
   const [data, setData] = useState<TokenStatistics | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [source, setSource] = useState<SourceKey>("workbuddy");
   const [range, setRange] = useState<RangeKey>("0");
 
-  const load = async (days: RangeKey) => {
-    try {
-      setRefreshing(true);
-      const n = Number(days);
-      const result = await api.getTokenStatistics(n === 0 ? undefined : n);
-      setData(result);
-    } catch (e: any) {
-      pushToast("加载失败", e?.toString() || "未知错误", "error");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  };
+  /** 平台↔数据源隔离：TRAE 只看云端用量，WorkBuddy / CodeBuddy 只看本地日志 */
+  const sourceKeys = useMemo<SourceKey[]>(
+    () =>
+      platform === "trae"
+        ? ["trae"]
+        : ["workbuddy", "workbuddy-ai", "codebuddy-ide"],
+    [platform],
+  );
+
+  // 平台切换后当前源不可见时，回退到该平台的首个源
+  useEffect(() => {
+    if (!sourceKeys.includes(source)) setSource(sourceKeys[0]);
+  }, [sourceKeys, source]);
+
+  /** force=true 跳过后端 10 分钟结果缓存，强制重新扫描与请求云端 */
+  const load = useCallback(
+    async (days: RangeKey, force = false) => {
+      try {
+        setRefreshing(true);
+        const n = Number(days);
+        const result = await api.getTokenStatistics(n === 0 ? undefined : n, force);
+        setData(result);
+      } catch (e: any) {
+        pushToast("加载失败", e?.toString() || "未知错误", "error");
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [pushToast]
+  );
 
   useEffect(() => {
     load(range);
-  }, [range]);
+  }, [range, load]);
 
   const current: TokenStatsSource | undefined = useMemo(() => {
     return data?.sources.find((s) => s.source === source);
@@ -246,9 +273,13 @@ export function TokenStatsPage() {
     <div className="tstats">
       <PageHeader
         title="Token 统计"
-        sub="扫描本地日志聚合，数据不上传；国内版与国际版独立统计"
+        sub={
+          platform === "trae"
+            ? "同步 TRAE 云端会话用量（最多回溯 90 天），仅本机展示"
+            : "扫描本地日志聚合，数据不上传；国内版与国际版独立统计"
+        }
         right={
-          <Button onClick={() => load(range)} disabled={refreshing}>
+          <Button onClick={() => load(range, true)} disabled={refreshing}>
             <RefreshCw className={refreshing ? "spin" : ""} />
             刷新
           </Button>
@@ -258,7 +289,7 @@ export function TokenStatsPage() {
       {/* 数据源 + 时间范围 */}
       <div className="tools">
         <Segmented
-          options={(Object.keys(SOURCE_LABELS) as SourceKey[]).map((k) => ({
+          options={sourceKeys.map((k) => ({
             value: k,
             label: SOURCE_LABELS[k],
           }))}
@@ -273,7 +304,7 @@ export function TokenStatsPage() {
           <RefreshCw className="spin" size={26} strokeWidth={1.6} />
         </div>
       ) : !current ? (
-        <div className="tstats-empty">暂无 {SOURCE_LABELS[source]} 的日志数据</div>
+        <div className="tstats-empty">{EMPTY_TEXT[source]}</div>
       ) : (
         <>
           {/* 概览主带：主指标 + KPI 分组 + 命中率圆环 */}
@@ -284,10 +315,16 @@ export function TokenStatsPage() {
               <div className="ts-hero-meta">
                 <span>请求数 {fmt(summary!.records)} 次</span>
                 {coverage && <span>覆盖 {coverage}</span>}
-                <span>扫描 {current.filesScanned} 个文件</span>
+                {source === "trae" ? (
+                  <span>同步 {current.filesScanned} 个账号</span>
+                ) : (
+                  <span>扫描 {current.filesScanned} 个文件</span>
+                )}
+                {current.notice && <span>{current.notice}</span>}
                 {current.parseErrors > 0 && (
                   <span className="tstats-err">{current.parseErrors} 行解析失败</span>
                 )}
+                {current.errors && <span className="tstats-err">{current.errors}</span>}
               </div>
             </div>
             <div className="ts-hero-kpis">

@@ -1,0 +1,47 @@
+name: Release
+
+# 推送 v* 标签时触发：构建签名安装包并发布 GitHub Release（含 latest.json 更新清单）
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 更新包签名密钥：仓库 Settings → Secrets → Actions 中配置，
+          # 值为本地 C:\Users\24782\.tauri\aimanager.key 文件的完整内容；
+          # 密钥无密码，TAURI_SIGNING_PRIVATE_KEY_PASSWORD 留空即可
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "TraeBuddy Keeper v__VERSION__"
+          releaseBody: "请下载对应安装包，应用内也会通过自动更新收到本次升级。"
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true

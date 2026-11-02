@@ -1,6 +1,16 @@
 .accs {
   max-width: 1040px;
 }
+
+/* 添加弹窗：WorkBuddy 国内/国际版本选择 */
+.wb-variant-row {
+  display: flex;
+  gap: 8px;
+}
+.wb-variant-row .flex1 {
+  flex: 1;
+}
+
 .accs-empty,
 .accs .dash-empty {
   border: 1px dashed var(--rule-strong);

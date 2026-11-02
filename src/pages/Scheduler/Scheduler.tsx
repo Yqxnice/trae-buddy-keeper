@@ -6,6 +6,7 @@ import { Switch } from "@/components/Switch/Switch";
 import { NumInput } from "@/components/TextInput/TextInput";
 import { useCheckinStore } from "@/stores/checkin";
 import { useUIStore } from "@/stores/ui";
+import { platformLabel } from "@/lib/utils";
 import "./Scheduler.css";
 
 export function SchedulerPage() {
@@ -52,6 +53,12 @@ export function SchedulerPage() {
     ? `${next.getMonth() + 1}/${next.getDate()} ${hh}:${mm}`
     : "未启用";
 
+  // 平台范围：空数组 = 全部平台（与后端语义一致）
+  const scopeLabel =
+    settings.platforms.length === 0
+      ? "全部产品"
+      : settings.platforms.map(platformLabel).join(" / ");
+
   return (
     <div className="sched">
       <PageHeader
@@ -95,7 +102,7 @@ export function SchedulerPage() {
           <span className="divider-v" />
           <div>
             <div className="bl">平台范围</div>
-            <div className="bv2">全部产品</div>
+            <div className="bv2">{scopeLabel}</div>
           </div>
           <span className="divider-v" />
           <div>
@@ -141,7 +148,8 @@ export function SchedulerPage() {
           </Button>
         </div>
         <p className="sched-hint">
-          失败达到最大次数后，账户进入冷却，冷却期间跳过签到。定时签到对所有产品生效。
+          失败达到最大次数后，账户进入冷却，冷却期间跳过签到。当前签到范围：{scopeLabel}
+          ，可在「设置 → 定时签到」调整。
         </p>
       </div>
 

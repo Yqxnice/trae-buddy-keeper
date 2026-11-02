@@ -1,3 +1,3 @@
 fn main() {
-    ai_manager_lib::run();
+    trae_buddy_keeper_lib::run();
 }

@@ -1,17 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
-  Trash2,
   Play,
   RefreshCw,
   Globe,
-  Upload,
-  Edit3,
-  Pencil,
-  ArrowLeftRight,
-  Coins,
-  Save,
-  Laptop,
 } from "lucide-react";
 import { PageHeader } from "@/components/PageHeader/PageHeader";
 import { Button } from "@/components/Button/Button";
@@ -21,7 +13,7 @@ import { LedgerRow, RowAction } from "@/components/LedgerRow/LedgerRow";
 import { RowMenu, type MenuItem } from "@/components/RowMenu/RowMenu";
 import { Dialog } from "@/components/Dialog/Dialog";
 import { TextInput, TextArea } from "@/components/TextInput/TextInput";
-import { api, type AccountInfo } from "@/lib/api";
+import { api, type AccountInfo, type WbVariant } from "@/lib/api";
 import traeLogo from "@/assets/logos/trae-color.svg";
 import workbuddyLogo from "@/assets/logos/workbuddy-color.svg";
 import codebuddyLogo from "@/assets/logos/codebuddy-color.svg";
@@ -29,8 +21,6 @@ import { confirmDialog } from "@/components/ConfirmDialog/ConfirmDialog";
 import { formatDate, formatRelative, platformLabel, checkinChipInfo, checkinDayStart } from "@/lib/utils";
 import { useUIStore } from "@/stores/ui";
 import "./Accounts.css";
-
-type AddTab = "manual" | "import" | "login";
 
 // 客户端切换器素材：卡片次行 SelectorBar（图标 + 名称，点击即切换）
 const CLIENT_APPS: Record<string, { src: string; label: string; short: string }> = {
@@ -62,20 +52,12 @@ export function AccountsPage() {
   const pushToast = useUIStore((s) => s.pushToast);
   const [accounts, setAccounts] = useState<AccountInfo[]>([]);
   const [loading, setLoading] = useState(true);
+  // 当前时间戳（秒）：列表渲染中用于到期/冷却的相对展示，挂载时取一次即可
+  const [nowSec, setNowSec] = useState(() => Date.now() / 1000);
   const [addOpen, setAddOpen] = useState(false);
-  const [addTab, setAddTab] = useState<AddTab>("manual");
   const [batchRunning, setBatchRunning] = useState(false);
   const [renewRunning, setRenewRunning] = useState(false);
 
-  // 手动添加表单（平台由当前面板标签决定）
-  const [manual, setManual] = useState({
-    name: "",
-    email: "",
-    access_token: "",
-    refresh_token: "",
-    cookies: "",
-  });
-  const [importJson, setImportJson] = useState("");
   const [checkingId, setCheckingId] = useState<string | null>(null);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [switchingCnId, setSwitchingCnId] = useState<string | null>(null);
@@ -100,117 +82,73 @@ export function AccountsPage() {
   const [oauthCallback, setOauthCallback] = useState("");
   const [oauthName, setOauthName] = useState("");
 
-  // WorkBuddy 网页登录状态（state 轮询）
+  // WorkBuddy 网页登录状态（state 轮询）；wbVariant 为登录目标档位
   const [wbWaiting, setWbWaiting] = useState(false);
   const [wbLoginState, setWbLoginState] = useState("");
+  const [wbVariant, setWbVariant] = useState<WbVariant>("cn");
 
   // 全屏 loading 仅首次挂载生效；后续刷新原地更新列表，避免整页拆建抖动
   // notify=true（手动刷新）时成功/失败均 toast；操作后的自动重载保持静默
-  const load = async (notify = false) => {
-    if (notify) setRefreshing(true);
-    try {
-      const list = await api.listAccounts();
-      setAccounts(list);
-      if (notify) pushToast("刷新成功", "账号列表已更新", "success");
-      // 后台刷新过期的真实积分（60s 内查过则跳过），完成后静默更新列表
-      const now = Date.now() / 1000;
-      const stale = list.some(
-        (a) => a.platform === platform && now - (a.credits_fetched_at || 0) > 60
-      );
-      if (stale) {
-        api
-          .refreshAllCredits(platform)
-          .then(() => api.listAccounts())
-          .then(setAccounts)
-          .catch(() => {});
+  const load = useCallback(
+    async (notify = false) => {
+      if (notify) setRefreshing(true);
+      try {
+        const list = await api.listAccounts();
+        setAccounts(list);
+        setNowSec(Date.now() / 1000);
+        if (notify) pushToast("刷新成功", "账号列表已更新", "success");
+        // 后台刷新过期的真实积分（60s 内查过则跳过），完成后静默更新列表
+        const now = Date.now() / 1000;
+        const stale = list.some(
+          (a) => a.platform === platform && now - (a.credits_fetched_at || 0) > 60
+        );
+        if (stale) {
+          api
+            .refreshAllCredits(platform)
+            .then(() => api.listAccounts())
+            .then(setAccounts)
+            .catch(() => {});
+        }
+      } catch (e: any) {
+        pushToast(notify ? "刷新失败" : "加载失败", e?.toString(), "error");
+      } finally {
+        setLoading(false);
+        if (notify) setRefreshing(false);
       }
-    } catch (e: any) {
-      pushToast(notify ? "刷新失败" : "加载失败", e?.toString(), "error");
-    } finally {
-      setLoading(false);
-      if (notify) setRefreshing(false);
-    }
-  };
+    },
+    [platform, pushToast]
+  );
 
   useEffect(() => {
     load();
-  }, [platform]);
+  }, [load]);
 
   const filtered = accounts.filter((a) => a.platform === platform);
 
-  // 三种添加方式：手动 / 导入 / 网页授权，按钮直达对应表单；切换时清理旧等待态
-  const openAdd = (tab: AddTab) => {
+  // 唯一添加方式：网页授权登录；打开弹窗时清理旧等待态
+  const openAdd = () => {
     if (oauthWaiting) handleCancelOauth();
     setWbWaiting(false);
     setWbLoginState("");
-    setAddTab(tab);
     setAddOpen(true);
   };
 
-  const handleManualAdd = async () => {
-    if (!manual.access_token && platform === "trae") {
-      pushToast("提示", "TRAE 账户需要 access_token", "error");
-      return;
-    }
-    if (!manual.cookies && platform === "workbuddy") {
-      pushToast("提示", "WorkBuddy 账户需要 cookies", "error");
-      return;
-    }
-    try {
-      await api.addAccountManual({ ...manual, platform });
-      pushToast("成功", "账户已添加", "success");
-      setAddOpen(false);
-      setManual({
-        name: "",
-        email: "",
-        access_token: "",
-        refresh_token: "",
-        cookies: "",
-      });
-      load();
-    } catch (e: any) {
-      pushToast("添加失败", e?.toString(), "error");
-    }
-  };
-
-  const handleImport = async () => {
-    // JSON 中未显式指定 platform 时，按当前面板标签注入
-    let json = importJson;
-    try {
-      const parsed = JSON.parse(importJson);
-      const items = (Array.isArray(parsed) ? parsed : [parsed]).map((it) => ({
-        platform,
-        ...it,
-      }));
-      json = JSON.stringify(Array.isArray(parsed) ? items : items[0]);
-    } catch {
-      pushToast("导入失败", "JSON 解析失败，请检查格式", "error");
-      return;
-    }
-    try {
-      const msg = await api.addAccountImport(json);
-      pushToast("导入成功", msg, "success");
-      setImportJson("");
-      setAddOpen(false);
-      load();
-    } catch (e: any) {
-      pushToast("导入失败", e?.toString(), "error");
-    }
-  };
-
-  const finishOauth = async (callbackUrl: string, name?: string) => {
-    try {
-      const msg = await api.completeTraeOauth(callbackUrl, name);
-      pushToast("授权成功", msg, "success");
-      setOauthWaiting(false);
-      setOauthCallback("");
-      setOauthName("");
-      setAddOpen(false);
-      load();
-    } catch (e: any) {
-      pushToast("授权失败", e?.toString(), "error");
-    }
-  };
+  const finishOauth = useCallback(
+    async (callbackUrl: string, name?: string) => {
+      try {
+        const msg = await api.completeTraeOauth(callbackUrl, name);
+        pushToast("授权成功", msg, "success");
+        setOauthWaiting(false);
+        setOauthCallback("");
+        setOauthName("");
+        setAddOpen(false);
+        load();
+      } catch (e: any) {
+        pushToast("授权失败", e?.toString(), "error");
+      }
+    },
+    [pushToast, load]
+  );
 
   // 授权回调事件：浏览器完成授权后自动完成登录
   useEffect(() => {
@@ -220,7 +158,7 @@ export function AccountsPage() {
     return () => {
       unlisten.then((f) => f());
     };
-  }, [oauthName]);
+  }, [oauthName, finishOauth]);
 
   const handleTraeOauth = async () => {
     // 乐观切换为等待状态，服务器启动与浏览器打开在后台进行
@@ -255,10 +193,16 @@ export function AccountsPage() {
 
   const handleWorkbuddyLogin = async () => {
     try {
-      const r = await api.startWorkbuddyLogin();
+      const r = await api.startWorkbuddyLogin(wbVariant);
       setWbLoginState(r.state);
       setWbWaiting(true);
-      pushToast("提示", "已在浏览器打开 WorkBuddy 登录页，完成后将自动添加", "info");
+      pushToast(
+        "提示",
+        wbVariant === "ai"
+          ? "已在浏览器打开 WorkBuddy 国际版登录页，完成后将自动添加"
+          : "已在浏览器打开 WorkBuddy 登录页，完成后将自动添加",
+        "info"
+      );
     } catch (e: any) {
       pushToast("启动登录失败", e?.toString(), "error");
     }
@@ -269,7 +213,7 @@ export function AccountsPage() {
     if (!wbWaiting || !wbLoginState) return;
     const timer = setInterval(async () => {
       try {
-        const r = await api.pollWorkbuddyLogin(wbLoginState);
+        const r = await api.pollWorkbuddyLogin(wbLoginState, wbVariant);
         if (r.status === "ready") {
           setWbWaiting(false);
           setWbLoginState("");
@@ -284,7 +228,11 @@ export function AccountsPage() {
       }
     }, 2000);
     return () => clearInterval(timer);
-  }, [wbWaiting, wbLoginState]);
+  }, [wbWaiting, wbLoginState, wbVariant, load, pushToast]);
+
+  /** 账号是否为 WorkBuddy 国际版（domain 后缀判定，与后端 variant_of 同口径） */
+  const isAiAccount = (acc: AccountInfo) =>
+    !!acc.domain && acc.domain.trim().toLowerCase().endsWith(".workbuddy.ai");
 
   const handleCheckin = async (id: string) => {
     setCheckingId(id);
@@ -296,6 +244,7 @@ export function AccountsPage() {
         r.success ? "success" : "error"
       );
       load();
+      useUIStore.getState().bumpCheckin();
     } catch (e: any) {
       pushToast("签到失败", e?.toString(), "error");
     } finally {
@@ -439,6 +388,7 @@ export function AccountsPage() {
         ok === results.length ? "success" : "info"
       );
       setAccounts(await api.listAccounts());
+      useUIStore.getState().bumpCheckin();
     } catch (e: any) {
       pushToast("批量签到失败", e?.toString(), "error");
     } finally {
@@ -489,7 +439,12 @@ export function AccountsPage() {
   }
 
   // 工具行门控：无 可签账号 / 无可续账号 时禁用批量动作（与后端跳过逻辑一致）
-  const checkableCount = filtered.filter((a) => !checkinBlocked(a) && !tokenExpired(a)).length;
+  const checkableCount = filtered.filter(
+    (a) =>
+      !checkinBlocked(a) &&
+      !tokenExpired(a) &&
+      !(platform === "workbuddy" && isAiAccount(a))
+  ).length;
   const renewEligible = filtered.some((a) => !renewLocked(a));
 
   return (
@@ -501,13 +456,7 @@ export function AccountsPage() {
 
       {/* 工具行 */}
       <div className="tools">
-        <Button variant="pri" onClick={() => openAdd("manual")}>
-          <Edit3 /> 手动添加
-        </Button>
-        <Button onClick={() => openAdd("import")}>
-          <Upload /> 导入
-        </Button>
-        <Button onClick={() => openAdd("login")}>
+        <Button variant="pri" onClick={openAdd}>
           <Globe /> 网页授权
         </Button>
         <span className="spacer" />
@@ -547,7 +496,7 @@ export function AccountsPage() {
           filtered.map((acc) => {
             const info = checkinChipInfo(acc);
             // 真实积分：右缘数值列（余额 + 最近一笔到期，悬停看全部明细）
-            const now = Date.now() / 1000;
+            const now = nowSec;
             const valid = (acc.credits_expiries || []).filter((e) => e.at > now && e.amount > 0);
             let creditSub = "无到期中的积分包";
             let creditTitle = creditSub;
@@ -573,6 +522,7 @@ export function AccountsPage() {
                 : switchingId === acc.id;
             // 行内按钮门控：今日已签/冷却中不可再签；Token 窗口外不可续期
             const blocked = checkinBlocked(acc);
+            const isAi = platform === "workbuddy" && isAiAccount(acc);
             const renewIsLocked = renewLocked(acc);
             const menu: MenuItem[] = [
               { label: "编辑", onClick: () => openEdit(acc.id) },
@@ -585,7 +535,11 @@ export function AccountsPage() {
                 stacked
                 avatar={<Avatar name={acc.name} src={acc.avatar} />}
                 name={acc.name || "未命名"}
-                meta={acc.email || undefined}
+                meta={
+                  isAi
+                    ? [acc.email, "国际版"].filter(Boolean).join(" · ") || undefined
+                    : acc.email || undefined
+                }
                 chip={<Chip tone={info.tone} dot>{info.label}</Chip>}
                 extra={
                   <div className="accs-clients">
@@ -616,7 +570,9 @@ export function AccountsPage() {
                     <RowAction
                       label="签到"
                       title={
-                        blocked === "cooling"
+                        isAi
+                          ? "WorkBuddy 国际版没有签到接口"
+                          : blocked === "cooling"
                           ? `冷却中 · 至 ${formatDate(acc.cooldown_until)}`
                           : blocked === "signed"
                             ? "今日已签到，明日 06:00 后可再签"
@@ -624,7 +580,7 @@ export function AccountsPage() {
                               ? "凭证已失效，请先续期"
                               : "立即签到"
                       }
-                      disabled={blocked != null || checkingId === acc.id}
+                      disabled={isAi || blocked != null || checkingId === acc.id}
                       onClick={() => handleCheckin(acc.id)}
                     />
                     <RowAction
@@ -639,8 +595,8 @@ export function AccountsPage() {
                         renewIsLocked
                           ? acc.token_expires_at <= 0
                             ? "无有效期信息，无法自动续期"
-                            : `Token 剩余 ${Math.ceil((acc.token_expires_at - Date.now() / 1000) / 86400)} 天，到期前 24h 内才可续期`
-                          : acc.token_expires_at < Date.now() / 1000
+                            : `Token 剩余 ${Math.ceil((acc.token_expires_at - nowSec) / 86400)} 天，到期前 24h 内才可续期`
+                          : acc.token_expires_at < nowSec
                             ? "凭证已过期，立即续期"
                             : "手动续期"
                       }
@@ -663,7 +619,7 @@ export function AccountsPage() {
                   <span className="accs-note">
                     最后签到 {formatRelative(acc.last_checkin_time)} · Token 到期{" "}
                     {acc.token_expires_at ? formatDate(acc.token_expires_at) : "—"}
-                    {acc.cooldown_until > Date.now() / 1000 &&
+                    {acc.cooldown_until > nowSec &&
                       ` · 冷却至 ${formatDate(acc.cooldown_until)}`}
                   </span>
                   {acc.credits_balance != null ? (
@@ -738,177 +694,110 @@ export function AccountsPage() {
         </div>
       </Dialog>
 
-      {/* 添加账号弹窗：由工具行按钮直达对应表单，平台由当前产品决定 */}
+      {/* 添加账号弹窗：网页授权登录，平台由当前产品决定 */}
       <Dialog
         open={addOpen}
         onClose={closeAddDialog}
         title={`添加 ${platformLabel(platform)} 账号`}
-        description={
-          addTab === "manual"
-            ? "填写登录凭据直接入库"
-            : addTab === "import"
-              ? "粘贴凭据 JSON 入库"
-              : "在浏览器完成登录后自动捕获凭据"
-        }
+        description="在浏览器完成登录后自动捕获凭据"
       >
-        {addTab === "manual" && (
-          <div className="accs-tabpane">
-            <div className="fld">
-              <label>名称</label>
-              <TextInput
-                value={manual.name}
-                onChange={(e) => setManual({ ...manual, name: e.target.value })}
-                placeholder="账户备注名"
-              />
-            </div>
-            <div className="fld">
-              <label>邮箱（可选）</label>
-              <TextInput
-                value={manual.email}
-                onChange={(e) => setManual({ ...manual, email: e.target.value })}
-                placeholder="email@example.com"
-              />
-            </div>
-            {platform === "trae" ? (
+        <div className="accs-tabpane">
+          {platform === "trae" ? (
+            oauthWaiting ? (
               <>
-                <div className="fld">
-                  <label>Access Token</label>
-                  <TextInput
-                    value={manual.access_token}
-                    onChange={(e) => setManual({ ...manual, access_token: e.target.value })}
-                    placeholder="Bearer token"
-                  />
+                <div className="accs-waiting">
+                  <RefreshCw className="spin" size={14} />
+                  正在等待浏览器完成授权，回调将自动完成登录…
                 </div>
                 <div className="fld">
-                  <label>Refresh Token（可选）</label>
-                  <TextInput
-                    value={manual.refresh_token}
-                    onChange={(e) => setManual({ ...manual, refresh_token: e.target.value })}
-                    placeholder="用于自动续期"
+                  <label>回调 URL（自动填充失败时手动粘贴）</label>
+                  <TextArea
+                    value={oauthCallback}
+                    onChange={(e) => setOauthCallback(e.target.value)}
+                    placeholder="http://127.0.0.1:18923/authorize?refreshToken=..."
+                    rows={3}
                   />
                 </div>
-              </>
-            ) : (
-              <div className="fld">
-                <label>Cookies（JSON 数组）</label>
-                <TextArea
-                  value={manual.cookies}
-                  onChange={(e) => setManual({ ...manual, cookies: e.target.value })}
-                  placeholder='[{"name":"xxx","value":"yyy"}]'
-                  rows={4}
-                />
-              </div>
-            )}
-            <Button variant="pri" className="w-full" onClick={handleManualAdd}>
-              添加账户
-            </Button>
-          </div>
-        )}
-
-        {addTab === "import" && (
-          <div className="accs-tabpane">
-            <div className="fld">
-              <label>凭据 JSON</label>
-              <TextArea
-                value={importJson}
-                onChange={(e) => setImportJson(e.target.value)}
-                placeholder={
-                  platform === "trae"
-                    ? '{"name":"我的账户","access_token":"...","refresh_token":"..."}'
-                    : '{"name":"我的账户","cookies":[{"name":"xxx","value":"yyy"}]}'
-                }
-                rows={8}
-              />
-            </div>
-            <p className="hint">
-              支持单个对象或数组，默认导入为 {platformLabel(platform)} 账户（JSON 中显式指定的
-              platform 字段优先）。
-            </p>
-            <Button variant="pri" className="w-full" onClick={handleImport}>
-              导入
-            </Button>
-          </div>
-        )}
-
-        {addTab === "login" && (
-          <div className="accs-tabpane">
-            {platform === "trae" ? (
-              oauthWaiting ? (
-                <>
-                  <div className="accs-waiting">
-                    <RefreshCw className="spin" size={14} />
-                    正在等待浏览器完成授权，回调将自动完成登录…
-                  </div>
-                  <div className="fld">
-                    <label>回调 URL（自动填充失败时手动粘贴）</label>
-                    <TextArea
-                      value={oauthCallback}
-                      onChange={(e) => setOauthCallback(e.target.value)}
-                      placeholder="http://127.0.0.1:18923/authorize?refreshToken=..."
-                      rows={3}
-                    />
-                  </div>
-                  <p className="hint">
-                    若长时间停留在「认证中」（常见于 18923
-                    端口被占用），请取消后改用「手动」标签页添加。
-                  </p>
-                  <div className="dlg-acts">
-                    <Button onClick={handleCancelOauth}>取消</Button>
-                    <Button
-                      variant="pri"
-                      disabled={!oauthCallback.trim()}
-                      onClick={() => finishOauth(oauthCallback.trim(), oauthName || undefined)}
-                    >
-                      完成登录
-                    </Button>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <p className="hint">
-                    点击下方按钮在系统浏览器中打开 TRAE
-                    授权页，授权完成后自动捕获登录凭证并添加账户，无需手动复制 token。
-                  </p>
-                  <div className="fld">
-                    <label>账号备注名（可选）</label>
-                    <TextInput
-                      value={oauthName}
-                      onChange={(e) => setOauthName(e.target.value)}
-                      placeholder="留空则使用 TRAE 用户名"
-                    />
-                  </div>
-                  <Button variant="pri" className="w-full" onClick={handleTraeOauth}>
-                    <Globe /> 打开浏览器授权登录
+                <p className="hint">
+                  若长时间停留在「认证中」（常见于 18923
+                  端口被占用），请取消后重试，或将回调 URL 粘贴到上方输入框完成登录。
+                </p>
+                <div className="dlg-acts">
+                  <Button onClick={handleCancelOauth}>取消</Button>
+                  <Button
+                    variant="pri"
+                    disabled={!oauthCallback.trim()}
+                    onClick={() => finishOauth(oauthCallback.trim(), oauthName || undefined)}
+                  >
+                    完成登录
                   </Button>
-                </>
-              )
-            ) : wbWaiting ? (
-              <>
-                <p className="hint">
-                  等待浏览器登录完成…（扫码或账号授权后会自动添加账户）
-                </p>
-                <Button
-                  className="w-full"
-                  onClick={() => {
-                    setWbWaiting(false);
-                    setWbLoginState("");
-                  }}
-                >
-                  取消
-                </Button>
+                </div>
               </>
             ) : (
               <>
                 <p className="hint">
-                  点击下方按钮在浏览器中打开 WorkBuddy 登录页，完成登录后自动添加账户。
+                  点击下方按钮在系统浏览器中打开 TRAE
+                  授权页，授权完成后自动捕获登录凭证并添加账户，无需手动复制 token。
                 </p>
-                <Button variant="pri" className="w-full" onClick={handleWorkbuddyLogin}>
-                  <Globe /> 打开浏览器登录 WorkBuddy
+                <div className="fld">
+                  <label>账号备注名（可选）</label>
+                  <TextInput
+                    value={oauthName}
+                    onChange={(e) => setOauthName(e.target.value)}
+                    placeholder="留空则使用 TRAE 用户名"
+                  />
+                </div>
+                <Button variant="pri" className="w-full" onClick={handleTraeOauth}>
+                  <Globe /> 打开浏览器授权登录
                 </Button>
               </>
-            )}
-          </div>
-        )}
+            )
+          ) : wbWaiting ? (
+            <>
+              <p className="hint">
+                等待浏览器登录完成…（扫码或账号授权后会自动添加账户）
+              </p>
+              <Button
+                className="w-full"
+                onClick={() => {
+                  setWbWaiting(false);
+                  setWbLoginState("");
+                }}
+              >
+                取消
+              </Button>
+            </>
+          ) : (
+            <>
+              <p className="hint">
+                点击下方按钮在浏览器中打开 WorkBuddy
+                登录页，完成登录后自动添加账户。国际版账号无签到接口，仅支持切换客户端与用量统计。
+              </p>
+              <div className="fld">
+                <label>WorkBuddy 版本</label>
+                <div className="wb-variant-row">
+                  <Button
+                    variant={wbVariant === "cn" ? "pri" : "default"}
+                    className="flex1"
+                    onClick={() => setWbVariant("cn")}
+                  >
+                    国内版
+                  </Button>
+                  <Button
+                    variant={wbVariant === "ai" ? "pri" : "default"}
+                    className="flex1"
+                    onClick={() => setWbVariant("ai")}
+                  >
+                    国际版
+                  </Button>
+                </div>
+              </div>
+              <Button variant="pri" className="w-full" onClick={handleWorkbuddyLogin}>
+                <Globe /> 打开浏览器登录 WorkBuddy
+              </Button>
+            </>
+          )}
+        </div>
       </Dialog>
     </div>
   );

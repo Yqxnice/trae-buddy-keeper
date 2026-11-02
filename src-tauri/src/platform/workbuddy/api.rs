@@ -2,17 +2,22 @@ use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde_json::Value;
 
+use super::variant::variant_of;
 use crate::data::models::Account;
 
+/// 兼容旧代码的国内版基址；实际请求一律用 `base_for(acc)` 按档位取
 const WB_BASE: &str = "https://www.codebuddy.cn";
+
+/// 按账号档位取 API 基址（国内 www.codebuddy.cn / 国际 www.workbuddy.ai）
+fn base_for(acc: &Account) -> &'static str {
+    variant_of(acc).api_endpoint()
+}
 
 pub fn cookie_header(cookies_json: &str) -> Result<String> {
     // cookies 存为 JSON 数组: [{name, value}, ...]
-    let arr: Value = serde_json::from_str(cookies_json)
-        .map_err(|e| anyhow!("cookie 解析失败: {}", e))?;
-    let cookies = arr
-        .as_array()
-        .ok_or_else(|| anyhow!("cookie 格式非数组"))?;
+    let arr: Value =
+        serde_json::from_str(cookies_json).map_err(|e| anyhow!("cookie 解析失败: {}", e))?;
+    let cookies = arr.as_array().ok_or_else(|| anyhow!("cookie 格式非数组"))?;
     let parts: Vec<String> = cookies
         .iter()
         .filter_map(|c| {
@@ -26,16 +31,17 @@ pub fn cookie_header(cookies_json: &str) -> Result<String> {
 
 pub async fn do_checkin(acc: &Account) -> Result<(bool, i64, String)> {
     let client = Client::new();
+    let wb_base = base_for(acc);
     // 浏览器登录拿到的 token 账号（无 cookie）：走 /v2 + Bearer 通道；
     // 手动粘贴 cookie 的账号：走网页 Cookie 通道
     let token_mode = acc.cookies.trim().is_empty() && !acc.access_token.trim().is_empty();
     let req = if token_mode {
         client
-            .post(format!("{}/v2/billing/meter/daily-checkin", WB_BASE))
+            .post(format!("{}/v2/billing/meter/daily-checkin", wb_base))
             .header("Content-Type", "application/json")
             .bearer_auth(acc.access_token.trim())
-            .header("Origin", WB_BASE)
-            .header("Referer", &format!("{}/", WB_BASE))
+            .header("Origin", wb_base)
+            .header("Referer", &format!("{}/", wb_base))
             .body("{}")
     } else {
         let cookie = cookie_header(&acc.cookies)?;
@@ -43,11 +49,11 @@ pub async fn do_checkin(acc: &Account) -> Result<(bool, i64, String)> {
             return Ok((false, 0, "无可用 cookie".to_string()));
         }
         client
-            .post(format!("{}/billing/meter/daily-checkin", WB_BASE))
+            .post(format!("{}/billing/meter/daily-checkin", wb_base))
             .header("Content-Type", "application/json")
             .header("Cookie", &cookie)
-            .header("Origin", WB_BASE)
-            .header("Referer", &format!("{}/profile/usage", WB_BASE))
+            .header("Origin", wb_base)
+            .header("Referer", &format!("{}/profile/usage", wb_base))
             .body("{}")
     };
     let resp = req.send().await?;
@@ -81,13 +87,14 @@ pub async fn do_checkin(acc: &Account) -> Result<(bool, i64, String)> {
 pub async fn verify_cookies(cookies_json: &str) -> Result<bool> {
     let client = Client::new();
     let cookie = cookie_header(cookies_json)?;
-    let url = format!("{}/billing/meter/check-gift-claimed", WB_BASE);
+    // 手动粘贴 cookie 的入口只存在于国内版流程
+    let url = format!("{WB_BASE}/billing/meter/check-gift-claimed");
     let resp = client
         .post(&url)
         .header("Content-Type", "application/json")
         .header("Cookie", &cookie)
         .header("Origin", WB_BASE)
-        .header("Referer", &format!("{}/profile/usage", WB_BASE))
+        .header("Referer", &format!("{WB_BASE}/profile/usage"))
         .body("{}")
         .send()
         .await?;
@@ -105,15 +112,16 @@ pub async fn refresh_access_token(acc: &Account) -> Result<(String, String, i64)
         return Err(anyhow!("该账号没有 refreshToken，只能重新扫码或登录"));
     }
     let client = Client::new();
-    // 与登录同 host（www.codebuddy.cn）：platform=workbuddy 的 token 用 copilot.tencent.com
-    // 刷新可能拿不到同档位会话，刷新端点与登录接口保持同口径
+    // 刷新端点与登录接口保持同 host：platform=workbuddy 在 www.codebuddy.cn，
+    // platform=workbuddy-ai 在 www.workbuddy.ai，跨档位刷新可能拿不到同档位会话
+    let base = variant_of(acc).api_endpoint();
     let resp = client
-        .post("https://www.codebuddy.cn/v2/plugin/auth/token/refresh")
+        .post(format!("{base}/v2/plugin/auth/token/refresh"))
         .header("Accept", "application/json, text/plain, */*")
         .header("X-Requested-With", "XMLHttpRequest")
         .header("User-Agent", "CLI/2.63.2 CodeBuddy/2.63.2")
-        .header("Origin", "https://www.codebuddy.cn")
-        .header("Referer", "https://www.codebuddy.cn/")
+        .header("Origin", base)
+        .header("Referer", &format!("{base}/"))
         // 刷新带的是旧 accessToken（上游同样用刷新前的值构造头）
         .bearer_auth(acc.access_token.trim())
         .header("X-Refresh-Token", refresh)
@@ -128,7 +136,10 @@ pub async fn refresh_access_token(acc: &Account) -> Result<(String, String, i64)
             resp.status()
         ));
     }
-    let v: Value = resp.json().await.map_err(|e| anyhow!("刷新响应不是 JSON: {}", e))?;
+    let v: Value = resp
+        .json()
+        .await
+        .map_err(|e| anyhow!("刷新响应不是 JSON: {}", e))?;
     let body = match v.get("data") {
         Some(d) if d.is_object() => d.clone(),
         _ => v.clone(),
@@ -149,9 +160,7 @@ pub async fn refresh_access_token(acc: &Account) -> Result<(String, String, i64)
         .to_string();
     // expiresIn 缺省时保留旧到期时间，不乱写
     let expires_at = match body.get("expiresIn").and_then(|e| e.as_i64()) {
-        Some(secs) if secs > 0 && secs < 10 * 365 * 86400 => {
-            chrono::Utc::now().timestamp() + secs
-        }
+        Some(secs) if secs > 0 && secs < 10 * 365 * 86400 => chrono::Utc::now().timestamp() + secs,
         _ => acc.token_expires_at,
     };
     Ok((new_access, new_refresh, expires_at))

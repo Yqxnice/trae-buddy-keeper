@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { RefreshCw, Trash2 } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
 import { PageHeader } from "@/components/PageHeader/PageHeader";
 import { Button } from "@/components/Button/Button";
 import { Segmented } from "@/components/Segmented/Segmented";
@@ -25,22 +26,39 @@ export function LogsPage() {
   const [lv, setLv] = useState<LvFilter>("all");
 
   // 全屏 loading 仅首次挂载；手动刷新原地更新并 toast 结果
-  const load = async (notify = false) => {
-    if (notify) setRefreshing(true);
-    try {
-      setLogs(await api.getLogs(300));
-      if (notify) pushToast("刷新成功", "日志已更新", "success");
-    } catch (e: any) {
-      pushToast(notify ? "刷新失败" : "日志加载失败", e?.toString(), "error");
-    } finally {
-      setLoading(false);
-      if (notify) setRefreshing(false);
-    }
-  };
+  const load = useCallback(
+    async (notify = false) => {
+      if (notify) setRefreshing(true);
+      try {
+        setLogs(await api.getLogs(300));
+        if (notify) pushToast("刷新成功", "日志已更新", "success");
+      } catch (e: any) {
+        pushToast(notify ? "刷新失败" : "日志加载失败", e?.toString(), "error");
+      } finally {
+        setLoading(false);
+        if (notify) setRefreshing(false);
+      }
+    },
+    [pushToast]
+  );
 
   useEffect(() => {
     load();
-  }, []);
+  }, [load]);
+
+  // 后端每写入/清空一条日志都会广播 logs-updated，防抖合并批量签到等连续写入
+  // 后静默刷新（无全屏 loading、无 toast），手动刷新按钮保留
+  const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const unlisten = listen("logs-updated", () => {
+      if (reloadTimer.current) clearTimeout(reloadTimer.current);
+      reloadTimer.current = setTimeout(() => load(), 600);
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+      if (reloadTimer.current) clearTimeout(reloadTimer.current);
+    };
+  }, [load]);
 
   const handleClear = async () => {
     if (

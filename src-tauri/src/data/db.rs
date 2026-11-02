@@ -1,21 +1,58 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use crate::data::models::*;
 
 pub struct Database {
     conn: Mutex<Connection>,
+    /// 前端事件发射器（setup 阶段注入），日志变更时广播 logs-updated 驱动 UI 刷新
+    emitter: OnceLock<tauri::AppHandle>,
 }
 
 impl Database {
     pub fn new(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
+        // 外部进程短暂锁库（备份工具/杀软扫描等）时等待重试而非立即失败，
+        // 避免日志等写入被静默丢弃
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
         let db = Database {
             conn: Mutex::new(conn),
+            emitter: OnceLock::new(),
         };
         db.init()?;
         Ok(db)
+    }
+
+    /// 注入应用句柄（仅 setup 阶段调用一次）
+    pub fn set_emitter(&self, app: tauri::AppHandle) {
+        let _ = self.emitter.set(app);
+    }
+
+    /// 广播日志变更信号（日志页监听后静默刷新）
+    fn notify_logs_changed(&self) {
+        if let Some(app) = self.emitter.get() {
+            use tauri::Emitter;
+            let _ = app.emit("logs-updated", ());
+        }
+    }
+
+    /// 将当前数据库一致性快照写入目标路径（backup API，可在连接打开时安全执行）
+    pub fn backup_to(&self, dest: &std::path::Path) -> Result<()> {
+        let src = self.conn.lock().unwrap();
+        let mut dest_conn = Connection::open(dest)?;
+        let backup = rusqlite::backup::Backup::new(&src, &mut dest_conn)?;
+        backup.run_to_completion(64, std::time::Duration::from_millis(5), None)?;
+        Ok(())
+    }
+
+    /// 从备份文件恢复到当前连接（运行中安全执行，覆盖全部表数据）
+    pub fn restore_from(&self, src: &std::path::Path) -> Result<()> {
+        let src_conn = Connection::open(src)?;
+        let mut dst = self.conn.lock().unwrap();
+        let backup = rusqlite::backup::Backup::new(&src_conn, &mut dst)?;
+        backup.run_to_completion(64, std::time::Duration::from_millis(5), None)?;
+        Ok(())
     }
 
     fn init(&self) -> Result<()> {
@@ -81,17 +118,50 @@ impl Database {
         )?;
         // 旧库迁移：补积分列（CREATE TABLE 只对新库生效）
         for (col, ddl) in [
-            ("credits_balance", "ALTER TABLE accounts ADD COLUMN credits_balance REAL"),
-            ("credits_expiries", "ALTER TABLE accounts ADD COLUMN credits_expiries TEXT NOT NULL DEFAULT ''"),
-            ("credits_fetched_at", "ALTER TABLE accounts ADD COLUMN credits_fetched_at INTEGER NOT NULL DEFAULT 0"),
-            ("avatar", "ALTER TABLE accounts ADD COLUMN avatar TEXT NOT NULL DEFAULT ''"),
-            ("uid", "ALTER TABLE accounts ADD COLUMN uid TEXT NOT NULL DEFAULT ''"),
-            ("domain", "ALTER TABLE accounts ADD COLUMN domain TEXT NOT NULL DEFAULT ''"),
-            ("enterprise_id", "ALTER TABLE accounts ADD COLUMN enterprise_id TEXT NOT NULL DEFAULT ''"),
-            ("account_type", "ALTER TABLE accounts ADD COLUMN account_type TEXT NOT NULL DEFAULT ''"),
-            ("device_id", "ALTER TABLE accounts ADD COLUMN device_id TEXT NOT NULL DEFAULT ''"),
-            ("device_key", "ALTER TABLE accounts ADD COLUMN device_key TEXT NOT NULL DEFAULT ''"),
-            ("machine_id", "ALTER TABLE accounts ADD COLUMN machine_id TEXT NOT NULL DEFAULT ''"),
+            (
+                "credits_balance",
+                "ALTER TABLE accounts ADD COLUMN credits_balance REAL",
+            ),
+            (
+                "credits_expiries",
+                "ALTER TABLE accounts ADD COLUMN credits_expiries TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "credits_fetched_at",
+                "ALTER TABLE accounts ADD COLUMN credits_fetched_at INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "avatar",
+                "ALTER TABLE accounts ADD COLUMN avatar TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "uid",
+                "ALTER TABLE accounts ADD COLUMN uid TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "domain",
+                "ALTER TABLE accounts ADD COLUMN domain TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "enterprise_id",
+                "ALTER TABLE accounts ADD COLUMN enterprise_id TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "account_type",
+                "ALTER TABLE accounts ADD COLUMN account_type TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "device_id",
+                "ALTER TABLE accounts ADD COLUMN device_id TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "device_key",
+                "ALTER TABLE accounts ADD COLUMN device_key TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "machine_id",
+                "ALTER TABLE accounts ADD COLUMN machine_id TEXT NOT NULL DEFAULT ''",
+            ),
         ] {
             let exists: bool = conn
                 .prepare("SELECT 1 FROM pragma_table_info('accounts') WHERE name=?1")?
@@ -124,38 +194,76 @@ impl Database {
         Ok(())
     }
 
-    pub fn update_account_tokens(&self, id: &str, access_token: &str, refresh_token: &str,
-        token_expires_at: i64, refresh_token_expires_at: i64) -> Result<()> {
+    pub fn update_account_tokens(
+        &self,
+        id: &str,
+        access_token: &str,
+        refresh_token: &str,
+        token_expires_at: i64,
+        refresh_token_expires_at: i64,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             r#"UPDATE accounts SET access_token=?1, refresh_token=?2, token_expires_at=?3,
                 refresh_token_expires_at=?4, updated_at=?5 WHERE id=?6"#,
-            params![access_token, refresh_token, token_expires_at, refresh_token_expires_at,
-                chrono::Utc::now().timestamp(), id],
+            params![
+                access_token,
+                refresh_token,
+                token_expires_at,
+                refresh_token_expires_at,
+                chrono::Utc::now().timestamp(),
+                id
+            ],
         )?;
         Ok(())
     }
 
-    pub fn update_account_info(&self, id: &str, name: &str, email: &str,
-        access_token: &str, refresh_token: &str, cookies: &str) -> Result<()> {
+    pub fn update_account_info(
+        &self,
+        id: &str,
+        name: &str,
+        email: &str,
+        access_token: &str,
+        refresh_token: &str,
+        cookies: &str,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             r#"UPDATE accounts SET name=?1, email=?2, access_token=?3, refresh_token=?4,
                 cookies=?5, updated_at=?6 WHERE id=?7"#,
-            params![name, email, access_token, refresh_token, cookies,
-                chrono::Utc::now().timestamp(), id],
+            params![
+                name,
+                email,
+                access_token,
+                refresh_token,
+                cookies,
+                chrono::Utc::now().timestamp(),
+                id
+            ],
         )?;
         Ok(())
     }
 
-    pub fn update_account_checkin(&self, id: &str, status: &str, last_checkin_time: i64,
-        fail_count: i32, cooldown_until: i64) -> Result<()> {
+    pub fn update_account_checkin(
+        &self,
+        id: &str,
+        status: &str,
+        last_checkin_time: i64,
+        fail_count: i32,
+        cooldown_until: i64,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             r#"UPDATE accounts SET checkin_status=?1, last_checkin_time=?2, fail_count=?3,
                 cooldown_until=?4, updated_at=?5 WHERE id=?6"#,
-            params![status, last_checkin_time, fail_count, cooldown_until,
-                chrono::Utc::now().timestamp(), id],
+            params![
+                status,
+                last_checkin_time,
+                fail_count,
+                cooldown_until,
+                chrono::Utc::now().timestamp(),
+                id
+            ],
         )?;
         Ok(())
     }
@@ -163,8 +271,14 @@ impl Database {
     pub fn delete_account(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM accounts WHERE id=?1", params![id])?;
-        conn.execute("DELETE FROM checkin_records WHERE account_id=?1", params![id])?;
-        conn.execute("DELETE FROM points_history WHERE account_id=?1", params![id])?;
+        conn.execute(
+            "DELETE FROM checkin_records WHERE account_id=?1",
+            params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM points_history WHERE account_id=?1",
+            params![id],
+        )?;
         Ok(())
     }
 
@@ -201,7 +315,11 @@ impl Database {
         Ok(())
     }
 
-    pub fn list_checkin_records(&self, account_id: Option<&str>, limit: i64) -> Result<Vec<CheckinRecord>> {
+    pub fn list_checkin_records(
+        &self,
+        account_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<CheckinRecord>> {
         let conn = self.conn.lock().unwrap();
         let sql = match account_id {
             Some(_) => "SELECT * FROM checkin_records WHERE account_id=?1 ORDER BY created_at DESC LIMIT ?2",
@@ -443,19 +561,36 @@ impl Database {
     }
 
     // ===== 系统日志 =====
-    /// 写一条日志（忽略失败；顺带按设置清理过期旧日志）
+    /// 写一条日志（顺带按设置清理过期旧日志；写入成功后广播 logs-updated）
     pub fn log(&self, level: &str, action: &str, message: &str) {
         let now = chrono::Utc::now().timestamp();
         let retention = self.load_app_settings().log_retention_days.max(1);
-        let conn = self.conn.lock().unwrap();
-        let _ = conn.execute(
-            "INSERT INTO app_logs (id, level, action, message, created_at) VALUES (?1,?2,?3,?4,?5)",
-            params![uuid::Uuid::new_v4().to_string(), level, action, message, now],
-        );
-        let _ = conn.execute(
-            "DELETE FROM app_logs WHERE created_at < ?1",
-            params![now - retention * 86400],
-        );
+        let insert = {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO app_logs (id, level, action, message, created_at) VALUES (?1,?2,?3,?4,?5)",
+                params![
+                    uuid::Uuid::new_v4().to_string(),
+                    level,
+                    action,
+                    message,
+                    now
+                ],
+            )
+        };
+        if let Err(e) = insert {
+            // 写入失败不能无声吞掉：落 stderr 便于诊断日志丢失
+            eprintln!("[db] 日志写入失败（{action} - {message}）: {e}");
+            return;
+        }
+        {
+            let conn = self.conn.lock().unwrap();
+            let _ = conn.execute(
+                "DELETE FROM app_logs WHERE created_at < ?1",
+                params![now - retention * 86400],
+            );
+        }
+        self.notify_logs_changed();
     }
 
     pub fn list_logs(&self, limit: i64) -> Result<Vec<AppLog>> {
@@ -481,8 +616,11 @@ impl Database {
     }
 
     pub fn clear_logs(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM app_logs", [])?;
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute("DELETE FROM app_logs", [])?;
+        }
+        self.notify_logs_changed();
         Ok(())
     }
 

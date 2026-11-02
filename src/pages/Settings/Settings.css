@@ -31,6 +31,12 @@
   color: var(--muted);
   margin-top: 2px;
 }
+.set-desc.data-dir {
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  word-break: break-all;
+  user-select: text;
+  cursor: text;
+}
 .path-row {
   flex: 2 1 320px;
   display: flex;

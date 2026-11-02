@@ -18,8 +18,8 @@ use std::sync::Arc;
 use crate::data::db::Database;
 use crate::data::models::{Account, CreditExpiry, CreditResult};
 use crate::platform::workbuddy::api::cookie_header;
+use crate::platform::workbuddy::variant::{variant_of, WbVariant};
 
-const WB_BASE: &str = "https://www.codebuddy.cn";
 /// 企业配额接口（参考实现同口径）：企业账号不走个人版资源接口
 const ENTERPRISE_USAGE_PATH: &str = "/v2/billing/meter/get-enterprise-user-usage";
 /// 企业 ID 补拉接口：type 兜底判定为企业版但账号缺 ID 时使用（单次尝试）
@@ -44,15 +44,23 @@ pub async fn fetch_credits(acc: &Account) -> Result<(f64, Vec<CreditExpiry>), St
     });
 
     let client = reqwest::Client::new();
-    // token 账号走 /v2 + Bearer；cookie 账号走网页 Cookie 通道（与签到同形）
+    let wb_base = variant_of(acc).api_endpoint();
+    // token 账号走 /v2 + Bearer（国际版实测无 /v2 前缀）；cookie 账号走网页 Cookie 通道（与签到同形）
+    let token_mode = acc.cookies.trim().is_empty() && !acc.access_token.trim().is_empty();
+    let is_ai = variant_of(acc) == WbVariant::Ai;
+    let path = if token_mode && !is_ai {
+        "/v2/billing/meter/get-user-resource"
+    } else {
+        "/billing/meter/get-user-resource"
+    };
     let req = if token_mode {
         client
-            .post(format!("{WB_BASE}/v2/billing/meter/get-user-resource"))
+            .post(format!("{wb_base}{path}"))
             .bearer_auth(acc.access_token.trim())
     } else {
         let cookie = cookie_header(&acc.cookies).map_err(|e| e.to_string())?;
         client
-            .post(format!("{WB_BASE}/billing/meter/get-user-resource"))
+            .post(format!("{wb_base}{path}"))
             .header("Cookie", cookie)
     };
     let resp = req
@@ -61,8 +69,8 @@ pub async fn fetch_credits(acc: &Account) -> Result<(f64, Vec<CreditExpiry>), St
         .header("Accept-Language", "zh-CN")
         .header("X-Requested-With", "XMLHttpRequest")
         .header("X-CodeBuddy-Request", "1")
-        .header("Origin", WB_BASE)
-        .header("Referer", format!("{WB_BASE}/profile/usage"))
+        .header("Origin", wb_base)
+        .header("Referer", format!("{wb_base}/profile/usage"))
         .json(&body)
         .send()
         .await
@@ -71,7 +79,10 @@ pub async fn fetch_credits(acc: &Account) -> Result<(f64, Vec<CreditExpiry>), St
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Err("凭证已过期(401)，请重新登录".to_string());
     }
-    let v: Value = resp.json().await.map_err(|e| format!("响应解析失败: {e}"))?;
+    let v: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("响应解析失败: {e}"))?;
     let code = v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
     if code != 0 {
         let msg = v
@@ -95,6 +106,7 @@ pub async fn fetch_credits(acc: &Account) -> Result<(f64, Vec<CreditExpiry>), St
                 expiries.push(CreditExpiry {
                     at,
                     amount: round_credits(remain),
+                    name: String::new(),
                 });
             }
         }
@@ -115,9 +127,9 @@ fn extract_resource_accounts(mut cur: &Value) -> Option<&Vec<Value>> {
                     .iter()
                     .filter_map(|k| map.get(*k))
                     .find(|v| v.is_object() || v.is_array());
-                match next {
-                    Some(v) => cur = v,
-                    None => return None,
+                {
+                    let v = next?;
+                    cur = v
                 }
             }
             Value::Array(arr) => return Some(arr),
@@ -184,7 +196,9 @@ struct EnterpriseUsage {
 }
 
 fn first_number(v: &Value, keys: &[&str]) -> Option<f64> {
-    keys.iter().filter_map(|k| v.get(*k)).find_map(|x| x.as_f64())
+    keys.iter()
+        .filter_map(|k| v.get(*k))
+        .find_map(|x| x.as_f64())
 }
 
 /// 解析企业配额响应：兼容 {data:{data:{…}}} / {data:{…}} / 字段位于顶层三种包装，
@@ -209,7 +223,10 @@ fn parse_enterprise_usage(response: &Value) -> Option<EnterpriseUsage> {
         let cycle_reset_at = ["cycleResetTime", "CycleResetTime"]
             .iter()
             .filter_map(|k| payload.get(*k))
-            .find_map(|x| x.as_i64().or_else(|| x.as_str().and_then(|s| s.parse().ok())));
+            .find_map(|x| {
+                x.as_i64()
+                    .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+            });
         return Some(EnterpriseUsage {
             limit_num,
             used,
@@ -224,13 +241,14 @@ async fn resolve_enterprise_id(acc: &Account) -> Option<String> {
     if acc.access_token.trim().is_empty() {
         return None;
     }
+    let base = variant_of(acc).api_endpoint();
     let resp = reqwest::Client::new()
-        .get(format!("{WB_BASE}{ENTERPRISE_ACCOUNTS_PATH}"))
+        .get(format!("{base}{ENTERPRISE_ACCOUNTS_PATH}"))
         .bearer_auth(acc.access_token.trim())
         .header("Accept", "application/json")
         .header("X-CodeBuddy-Request", "1")
-        .header("Origin", WB_BASE)
-        .header("Referer", format!("{WB_BASE}/console"))
+        .header("Origin", base)
+        .header("Referer", format!("{base}/console"))
         .send()
         .await
         .ok()?;
@@ -268,16 +286,17 @@ async fn fetch_enterprise_credits(
             .ok_or("企业账号缺少 enterpriseId，/console/accounts 补拉失败")?;
         let _ = db.set_enterprise_id(&acc.id, &eid);
     }
+    let base = variant_of(acc).api_endpoint();
     let resp = reqwest::Client::new()
-        .post(format!("{WB_BASE}{ENTERPRISE_USAGE_PATH}"))
+        .post(format!("{base}{ENTERPRISE_USAGE_PATH}"))
         .bearer_auth(acc.access_token.trim())
         .header("X-Enterprise-Id", &eid)
         .header("X-Tenant-Id", &eid)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
         .header("X-CodeBuddy-Request", "1")
-        .header("Origin", WB_BASE)
-        .header("Referer", format!("{WB_BASE}/profile/usage"))
+        .header("Origin", base)
+        .header("Referer", format!("{base}/profile/usage"))
         .json(&serde_json::json!({}))
         .send()
         .await
@@ -285,7 +304,10 @@ async fn fetch_enterprise_credits(
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Err("凭证已过期(401)，请重新登录".to_string());
     }
-    let v: Value = resp.json().await.map_err(|e| format!("响应解析失败: {e}"))?;
+    let v: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("响应解析失败: {e}"))?;
     let code = v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
     if code != 0 {
         let msg = v
@@ -304,6 +326,7 @@ async fn fetch_enterprise_credits(
         Some(ms) if remaining > 0.0 => vec![CreditExpiry {
             at: ms / 1000,
             amount: remaining,
+            name: String::new(),
         }],
         _ => vec![],
     };

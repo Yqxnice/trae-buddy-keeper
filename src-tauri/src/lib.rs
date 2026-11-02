@@ -36,13 +36,12 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![]),
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
-            let app_dir = app
-                .path()
-                .app_data_dir()
-                .expect("无法获取应用数据目录");
+            let app_dir = app.path().app_data_dir().expect("无法获取应用数据目录");
             std::fs::create_dir_all(&app_dir).ok();
-            let db_path = app_dir.join("ai-manager.db");
+            let db_path = app_dir.join("trae-buddy-keeper.db");
             let db = match Database::new(db_path.to_str().unwrap()) {
                 Ok(d) => Arc::new(d),
                 Err(e) => {
@@ -50,11 +49,16 @@ pub fn run() {
                     return Err(e.into());
                 }
             };
+            // 日志变更广播依赖应用句柄，需在所有写日志操作前注入
+            db.set_emitter(app.handle().clone());
 
             #[cfg(windows)]
             crate::infra::notification::register_windows_app_id(
                 &app.config().identifier,
-                app.config().product_name.as_deref().unwrap_or("AI 账户管家"),
+                app.config()
+                    .product_name
+                    .as_deref()
+                    .unwrap_or("TraeBuddy Keeper"),
             );
             let notif_mode = db
                 .get_setting("notification_mode")
@@ -86,14 +90,15 @@ pub fn run() {
                 let paths = crate::infra::clients::detect_client_paths();
                 s.client_path_trae = paths.trae;
                 s.client_path_workbuddy = paths.workbuddy;
+                s.client_path_workbuddy_ai = paths.workbuddy_ai;
                 s.client_path_codebuddy_cn = paths.codebuddy_cn;
                 if let Ok(json) = serde_json::to_string(&s) {
                     let _ = db.set_setting("app_settings", &json);
                 }
             }
-            let oauth_server = crate::platform::trae::oauth::OAuthServer(std::sync::Arc::new(std::sync::Mutex::new(
-                crate::platform::trae::oauth::OAuthState::default(),
-            )));
+            let oauth_server = crate::platform::trae::oauth::OAuthServer(std::sync::Arc::new(
+                std::sync::Mutex::new(crate::platform::trae::oauth::OAuthState::default()),
+            ));
             app.manage(oauth_server.clone());
             // 预热 OAuth 回调服务器，避免点击授权时临时绑定端口的延迟
             crate::platform::trae::oauth::prewarm(app.handle().clone(), oauth_server);
@@ -157,6 +162,10 @@ pub fn run() {
             get_logs,
             clear_logs,
             get_app_settings,
+            get_data_dir,
+            open_data_dir,
+            backup_data,
+            import_data,
             set_app_settings,
             detect_client_paths,
             get_token_statistics,
@@ -237,9 +246,11 @@ fn add_account_manual(
         credits_fetched_at: 0,
     };
     state.db.insert_account(&acc).map_err(|e| e.to_string())?;
-    state
-        .db
-        .log("info", "账户", &format!("手动添加 [{}] {}", platform, acc.name));
+    state.db.log(
+        "info",
+        "账户",
+        &format!("手动添加 [{}] {}", platform, acc.name),
+    );
     Ok(acc.id)
 }
 
@@ -409,7 +420,10 @@ async fn checkin_all(
     state: State<'_, AppState>,
     platform: Option<String>,
 ) -> Result<Vec<CheckinResult>, String> {
-    let results = state.checkin.checkin_all(platform.as_deref()).await?;
+    let results = state
+        .checkin
+        .checkin_all(platform.map(|p| vec![p]).as_deref())
+        .await?;
     let skipped = results.iter().filter(|r| r.skipped).count();
     let success = results.iter().filter(|r| r.success && !r.skipped).count();
     let failed = results.len() - success - skipped;
@@ -417,7 +431,10 @@ async fn checkin_all(
         .notifier
         .notify(
             "批量签到完成",
-            &format!("成功 {} 个，跳过 {} 个，失败 {} 个", success, skipped, failed),
+            &format!(
+                "成功 {} 个，跳过 {} 个，失败 {} 个",
+                success, skipped, failed
+            ),
         )
         .await;
     Ok(results)
@@ -502,7 +519,8 @@ async fn refresh_all_credits(
     }
     let mut results = Vec::new();
     for acc in &accounts {
-        results.push(crate::platform::workbuddy::credits::refresh_account(&state.db, &acc.id).await);
+        results
+            .push(crate::platform::workbuddy::credits::refresh_account(&state.db, &acc.id).await);
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
     Ok(results)
@@ -546,10 +564,7 @@ fn get_checkin_settings(state: State<AppState>) -> Result<CheckinSettings, Strin
 }
 
 #[tauri::command]
-fn set_checkin_settings(
-    state: State<AppState>,
-    settings: CheckinSettings,
-) -> Result<(), String> {
+fn set_checkin_settings(state: State<AppState>, settings: CheckinSettings) -> Result<(), String> {
     let json = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
     state
         .db
@@ -571,11 +586,146 @@ async fn set_notification_mode(state: State<'_, AppState>, mode: String) -> Resu
         .map_err(|e| e.to_string())
 }
 
+// ===== 数据备份与恢复 =====
+
+/// 递归复制目录（覆盖式合并），统计成功/失败文件数（被占用文件跳过）
+fn copy_dir_recursive(
+    src: &std::path::Path,
+    dest: &std::path::Path,
+    copied: &mut usize,
+    failed: &mut usize,
+) -> Result<(), String> {
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let ty = entry.file_type().map_err(|e| e.to_string())?;
+        let to = dest.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &to, copied, failed)?;
+        } else {
+            match std::fs::copy(entry.path(), &to) {
+                Ok(_) => *copied += 1,
+                Err(_) => *failed += 1,
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn backup_data(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let db = state.db.clone();
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Option<String>, String> {
+        // 弹窗选择备份保存位置；关闭弹窗视为取消
+        let Some(dest_root) = rfd::FileDialog::new()
+            .set_title("选择备份保存位置")
+            .pick_folder()
+        else {
+            return Ok(None);
+        };
+        let name = format!(
+            "TraeBuddyKeeper-Backup-{}",
+            chrono::Local::now().format("%Y%m%d-%H%M%S")
+        );
+        let dest = dest_root.join(name);
+        std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+        // 数据库一致性快照
+        db.backup_to(&dest.join("trae-buddy-keeper.db"))
+            .map_err(|e| e.to_string())?;
+        let mut note = dest.to_string_lossy().to_string();
+        // 授权会话目录（存在才复制）
+        let vaults = data_dir.join("vaults");
+        if vaults.exists() {
+            let (mut copied, mut failed) = (0usize, 0usize);
+            copy_dir_recursive(&vaults, &dest.join("vaults"), &mut copied, &mut failed)?;
+            if failed > 0 {
+                note = format!("{}（{} 个会话文件被占用未复制）", note, failed);
+            }
+        }
+        db.log("info", "备份", &format!("数据已备份至 {}", dest.display()));
+        Ok(Some(note))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn import_data(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let db = state.db.clone();
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Option<String>, String> {
+        let Some(src_root) = rfd::FileDialog::new()
+            .set_title("选择备份文件夹（需包含 trae-buddy-keeper.db）")
+            .pick_folder()
+        else {
+            return Ok(None);
+        };
+        let mut src_db = src_root.join("trae-buddy-keeper.db");
+        if !src_db.exists() {
+            // 兼容更名前的旧备份（数据库文件名为 ai-manager.db）
+            let legacy = src_root.join("ai-manager.db");
+            if !legacy.exists() {
+                return Err("所选文件夹不包含 trae-buddy-keeper.db，不是有效备份".to_string());
+            }
+            src_db = legacy;
+        }
+        db.restore_from(&src_db).map_err(|e| e.to_string())?;
+        let mut note = "数据库已恢复，建议重启应用".to_string();
+        let src_vaults = src_root.join("vaults");
+        if src_vaults.exists() {
+            let (mut copied, mut failed) = (0usize, 0usize);
+            copy_dir_recursive(&src_vaults, &data_dir.join("vaults"), &mut copied, &mut failed)?;
+            note = format!("数据库与 {} 个会话文件已恢复，建议重启应用", copied);
+            if failed > 0 {
+                note.push_str(&format!("（{} 个文件被占用跳过）", failed));
+            }
+        }
+        db.log("info", "导入", &format!("从 {} 恢复数据", src_root.display()));
+        Ok(Some(note))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ===== 通用设置 =====
 
 #[tauri::command]
 fn get_app_settings(state: State<AppState>) -> Result<AppSettings, String> {
     Ok(state.db.load_app_settings())
+}
+
+#[tauri::command]
+fn get_data_dir(state: State<AppState>) -> String {
+    state.data_dir.to_string_lossy().to_string()
+}
+
+#[tauri::command]
+fn open_data_dir(state: State<AppState>) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&state.data_dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&state.data_dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&state.data_dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -612,9 +762,7 @@ async fn renew_token(state: State<'_, AppState>, id: String) -> Result<String, S
         }
         Ok(None) => Ok("无需续期".to_string()),
         Err(e) => {
-            state
-                .db
-                .log("error", "续期", &format!("{}：{}", name, e));
+            state.db.log("error", "续期", &format!("{}：{}", name, e));
             Err(e.to_string())
         }
     }
@@ -676,13 +824,28 @@ async fn switch_workbuddy_client(state: State<'_, AppState>, id: String) -> Resu
     if acc.access_token.is_empty() {
         return Err("该账户缺少 access_token，请重新登录后再切换".to_string());
     }
-    // 客户端路径：设置页配置优先，其次注册表探测；先解析再关进程，避免关了才发现没路径
+    // 客户端路径：设置页配置优先，其次注册表探测；国际版账号用 WorkBuddy AI 客户端。
+    // 先解析再关进程，避免关了才发现没路径
     let exe = {
-        let configured = state.db.load_app_settings().client_path_workbuddy;
-        if !configured.is_empty() {
-            configured
-        } else {
-            crate::infra::clients::detect_client_paths().workbuddy
+        let settings = state.db.load_app_settings();
+        let detected = crate::infra::clients::detect_client_paths();
+        match crate::platform::workbuddy::variant::variant_of(&acc) {
+            crate::platform::workbuddy::variant::WbVariant::Ai => {
+                let configured = settings.client_path_workbuddy_ai;
+                if !configured.is_empty() {
+                    configured
+                } else {
+                    detected.workbuddy_ai
+                }
+            }
+            crate::platform::workbuddy::variant::WbVariant::Cn => {
+                let configured = settings.client_path_workbuddy;
+                if !configured.is_empty() {
+                    configured
+                } else {
+                    detected.workbuddy
+                }
+            }
         }
     };
     if exe.is_empty() {
@@ -698,21 +861,32 @@ async fn switch_workbuddy_client(state: State<'_, AppState>, id: String) -> Resu
     .map_err(|e| format!("切换任务执行失败: {e}"))?;
     match &result {
         Ok(msg) => {
-            db.log("success", "切换", &format!("WorkBuddy 客户端已切换到「{name}」"));
+            db.log(
+                "success",
+                "切换",
+                &format!("WorkBuddy 客户端已切换到「{name}」"),
+            );
             // 与活跃账户高亮语义保持一致
             let _ = db.set_setting("active_account", &id);
             let _ = db.set_setting("active_client_workbuddy", &id);
             Ok(msg.clone())
         }
         Err(e) => {
-            db.log("error", "切换", &format!("WorkBuddy 切换到「{name}」失败：{e}"));
+            db.log(
+                "error",
+                "切换",
+                &format!("WorkBuddy 切换到「{name}」失败：{e}"),
+            );
             Err(e.clone())
         }
     }
 }
 
 #[tauri::command]
-async fn switch_codebuddy_cn_client(state: State<'_, AppState>, id: String) -> Result<String, String> {
+async fn switch_codebuddy_cn_client(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<String, String> {
     let acc = state
         .db
         .get_account(&id)
@@ -745,12 +919,20 @@ async fn switch_codebuddy_cn_client(state: State<'_, AppState>, id: String) -> R
     .map_err(|e| format!("切换任务执行失败: {e}"))?;
     match &result {
         Ok(msg) => {
-            db.log("success", "切换", &format!("CodeBuddy CN 已切换到「{name}」"));
+            db.log(
+                "success",
+                "切换",
+                &format!("CodeBuddy CN 已切换到「{name}」"),
+            );
             let _ = db.set_setting("active_client_codebuddy_cn", &id);
             Ok(msg.clone())
         }
         Err(e) => {
-            db.log("error", "切换", &format!("CodeBuddy CN 切换到「{name}」失败：{e}"));
+            db.log(
+                "error",
+                "切换",
+                &format!("CodeBuddy CN 切换到「{name}」失败：{e}"),
+            );
             Err(e.clone())
         }
     }
@@ -797,7 +979,11 @@ async fn backup_trae_vault(state: State<'_, AppState>, id: String) -> Result<Str
             Ok(msg.clone())
         }
         Err(e) => {
-            db.log("error", "建档", &format!("Trae 账号「{name}」建档失败：{e}"));
+            db.log(
+                "error",
+                "建档",
+                &format!("Trae 账号「{name}」建档失败：{e}"),
+            );
             Err(e.clone())
         }
     }
@@ -870,11 +1056,102 @@ async fn switch_trae_client(state: State<'_, AppState>, id: String) -> Result<St
 ///
 /// 纯磁盘扫描，不放异步运行时：用 `spawn_blocking` 避免阻塞主线程。
 /// `days` 只接受 7/30/90，其它值或不传视为全量。
+/// 另含 TRAE 云端用量源（第四个 source，按 TRAE 账号拉取服务端接口）。
 #[tauri::command]
-async fn get_token_statistics(days: Option<i64>) -> Result<serde_json::Value, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::platform::token_stats::get_statistics(days)
-    })
-    .await
-    .map_err(|error| format!("扫描 Token 统计失败: {error}"))
+async fn get_token_statistics(
+    state: State<'_, AppState>,
+    days: Option<i64>,
+    force: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    // 结果缓存：本地日志扫描 + TRAE 云端请求开销大，10 分钟内直接返回缓存；
+    // 前端手动刷新传 force=true 跳过缓存强制重算
+    const TTL_SECS: i64 = 600;
+    let force = force.unwrap_or(false);
+    let cache_key = format!("token_stats_cache_{}", days.unwrap_or(0));
+    if !force {
+        if let Ok(Some(json)) = state.db.get_setting(&cache_key) {
+            if let Ok(entry) = serde_json::from_str::<serde_json::Value>(&json) {
+                let cached_at = entry
+                    .get("cached_at")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                if chrono::Utc::now().timestamp() - cached_at < TTL_SECS {
+                    if let Some(stats) = entry.get("stats") {
+                        return Ok(stats.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    let mut stats =
+        tauri::async_runtime::spawn_blocking(move || crate::platform::token_stats::get_statistics(days))
+            .await
+            .map_err(|error| format!("扫描 Token 统计失败: {error}"))?;
+
+    // ---- TRAE 云端用量源（云端型，无本地日志）----
+    let accounts: Vec<_> = state
+        .db
+        .list_accounts()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|a| a.platform == "trae" && !a.access_token.is_empty())
+        .collect();
+    let mut items: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for (idx, acc) in accounts.iter().enumerate() {
+        // 临期/过期先自动续期；失败不阻断，用现有 token 尽力拉取
+        let _ = state.token.auto_renew_if_needed(&acc.id).await;
+        let acc = state
+            .db
+            .get_account(&acc.id)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| acc.clone());
+        match crate::platform::trae::usage::fetch_all(&acc.access_token, days).await {
+            Ok(sessions) => {
+                items.extend(
+                    sessions
+                        .into_iter()
+                        .map(|s| (acc.name.clone(), s.to_stats_record())),
+                );
+            }
+            Err(e) => errors.push(format!("{}：{e}", acc.name)),
+        }
+        // 多账号之间错开请求，降低调用密度
+        if idx + 1 < accounts.len() {
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        }
+    }
+    let notice = if accounts.is_empty() {
+        Some("未添加 TRAE 账号，添加并授权后可统计云端用量".to_string())
+    } else if days.is_none() {
+        Some("云端用量最多回溯 90 天".to_string())
+    } else {
+        None
+    };
+    let errors = if errors.is_empty() {
+        None
+    } else {
+        Some(errors.join("；"))
+    };
+    let source = crate::platform::token_stats::trae_cloud_source(
+        items,
+        accounts.len(),
+        notice.as_deref(),
+        errors.as_deref(),
+    );
+    if let Some(arr) = stats
+        .get_mut("sources")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        arr.push(source);
+    }
+    // 写入缓存（失败不阻断返回）
+    let entry = serde_json::json!({
+        "cached_at": chrono::Utc::now().timestamp(),
+        "stats": stats,
+    });
+    let _ = state.db.set_setting(&cache_key, &entry.to_string());
+    Ok(stats)
 }

@@ -17,36 +17,44 @@
   font-size: 12.5px;
 }
 
-/* 7 日趋势微柱 */
-.trend-bars {
-  display: flex;
-  align-items: flex-end;
-  gap: 10px;
-  height: 92px;
+/* 近 7 日积分趋势（recharts 柱状图） */
+.dash-chart {
+  height: 180px;
   background: var(--surface);
   border: 1px solid var(--rule);
   border-radius: 10px;
-  padding: 14px 18px 10px;
+  padding: 14px 12px 6px;
 }
-.trend-col {
-  flex: 1;
-  height: 100%;
+.dash .recharts-tooltip-cursor {
+  fill: var(--surface2);
+}
+.dash-bar .recharts-rectangle {
+  fill: var(--brand);
+}
+.dash-tip {
+  background: var(--surface);
+  border: 1px solid var(--rule-strong);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 11.5px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
+}
+.dash-tip-date {
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.dash-tip-row {
   display: flex;
-  flex-direction: column;
   align-items: center;
   gap: 6px;
-  min-width: 0;
 }
-.trend-col i {
-  display: block;
-  width: 100%;
-  max-width: 34px;
-  border-radius: 4px 4px 2px 2px;
-  background: color-mix(in srgb, var(--brand) 72%, transparent);
-  min-height: 3px;
-}
-.trend-col span {
-  font-size: 10.5px;
-  color: var(--muted);
+.dash-tip-row b {
+  margin-left: auto;
   font-variant-numeric: tabular-nums;
+}
+.dash-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--brand);
 }

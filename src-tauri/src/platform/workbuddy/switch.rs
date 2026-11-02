@@ -9,20 +9,17 @@
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
+use super::variant::{variant_of, WbVariant};
 use crate::data::models::Account;
 
-/// 国内版认证文件名（与官方一致；国际版为 workbuddy-desktop-ai.info，本项目不涉及）
-const AUTH_FILE_NAME: &str = "workbuddy-desktop.info";
-/// CodeBuddy 国内版产品域
+/// CodeBuddy 国内版产品域（账号 domain 缺失时的兜底）
 const DOMAIN: &str = "www.codebuddy.cn";
-/// Windows 进程镜像名
-const PROCESS_IMAGE: &str = "WorkBuddy.exe";
 /// 关闭进程总预算：先优雅 12s，再强杀 8s（对齐参考实现的三级关闭口径）
 const GRACEFUL_WAIT_SECS: u64 = 12;
 const FORCE_WAIT_SECS: u64 = 8;
 
-/// 官方认证文件路径（三平台口径与参考实现一致）
-pub fn auth_file_path() -> Result<PathBuf, String> {
+/// 官方认证文件路径（三平台口径与参考实现一致；国内/国际同目录不同文件）
+pub fn auth_file_path(variant: WbVariant) -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or("无法定位用户主目录")?;
     #[cfg(target_os = "windows")]
     let dir = home.join("AppData/Local/CodeBuddyExtension/Data/Public/auth");
@@ -30,7 +27,7 @@ pub fn auth_file_path() -> Result<PathBuf, String> {
     let dir = home.join("Library/Application Support/CodeBuddyExtension/Data/Public/auth");
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let dir = home.join(".local/share/CodeBuddyExtension/Data/Public/auth");
-    Ok(dir.join(AUTH_FILE_NAME))
+    Ok(dir.join(variant.auth_file_name()))
 }
 
 /// 官方退出标记：在完整文件名后追加后缀（不是替换扩展名）
@@ -48,7 +45,13 @@ fn backup_auth_file(auth_path: &Path) -> Option<PathBuf> {
     let dir = auth_path.parent()?.join("backups");
     std::fs::create_dir_all(&dir).ok()?;
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-    let dest = dir.join(format!("workbuddy-desktop.{ts}.info"));
+    // 文件名按档位区分（workbuddy-desktop / workbuddy-desktop-ai），避免互相覆盖
+    let stem = auth_path
+        .file_name()?
+        .to_string_lossy()
+        .trim_end_matches(".info")
+        .to_string();
+    let dest = dir.join(format!("{stem}.{ts}.info"));
     std::fs::copy(auth_path, &dest).ok()?;
     Some(dest)
 }
@@ -217,31 +220,33 @@ fn write_account_to_auth_file(acc: &Account, auth_path: &Path) -> Result<(), Str
 // ===== 进程控制 =====
 
 #[cfg(target_os = "windows")]
-fn workbuddy_running() -> bool {
+fn workbuddy_running(image: &str) -> bool {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
     let out = std::process::Command::new("tasklist")
-        .args(["/FI", &format!("IMAGENAME eq {PROCESS_IMAGE}"), "/NH"])
+        .args(["/FI", &format!("IMAGENAME eq {image}"), "/NH"])
         .creation_flags(CREATE_NO_WINDOW)
         .output();
     match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).contains("WorkBuddy"),
+        // 镜像名精确匹配后 tasklist 无命中时输出「信息: 没有运行的任务匹配...」，不会含进程名
+        Ok(o) => String::from_utf8_lossy(&o.stdout).contains(image.trim_end_matches(".exe")),
         Err(_) => false,
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn workbuddy_running() -> bool {
+fn workbuddy_running(image: &str) -> bool {
     std::process::Command::new("pgrep")
-        .args(["-x", "WorkBuddy"])
+        .args(["-x", image])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
 /// 关闭 WorkBuddy：先温和结束，超时后强杀；仍有存活则报错（带残留进程写文件会切换无效）
-fn close_workbuddy() -> Result<(), String> {
-    if !workbuddy_running() {
+fn close_workbuddy(variant: WbVariant) -> Result<(), String> {
+    let image = variant.process_image();
+    if !workbuddy_running(image) {
         return Ok(());
     }
     #[cfg(target_os = "windows")]
@@ -250,43 +255,41 @@ fn close_workbuddy() -> Result<(), String> {
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         // 1) 温和结束（不带 /F，给客户端自行落盘的机会）
         let _ = std::process::Command::new("taskkill")
-            .args(["/IM", PROCESS_IMAGE, "/T"])
+            .args(["/IM", image, "/T"])
             .creation_flags(CREATE_NO_WINDOW)
             .output();
-        if wait_exit(GRACEFUL_WAIT_SECS) {
+        if wait_exit(image, GRACEFUL_WAIT_SECS) {
             return Ok(());
         }
         // 2) 进程树强杀
         let _ = std::process::Command::new("taskkill")
-            .args(["/IM", PROCESS_IMAGE, "/T", "/F"])
+            .args(["/IM", image, "/T", "/F"])
             .creation_flags(CREATE_NO_WINDOW)
             .output();
-        if wait_exit(FORCE_WAIT_SECS) {
+        if wait_exit(image, FORCE_WAIT_SECS) {
             return Ok(());
         }
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = std::process::Command::new("pkill")
-            .args(["-x", "WorkBuddy"])
-            .output();
-        if wait_exit(GRACEFUL_WAIT_SECS) {
+        let _ = std::process::Command::new("pkill").args(["-x", image]).output();
+        if wait_exit(image, GRACEFUL_WAIT_SECS) {
             return Ok(());
         }
         let _ = std::process::Command::new("pkill")
-            .args(["-9", "-x", "WorkBuddy"])
+            .args(["-9", "-x", image])
             .output();
-        if wait_exit(FORCE_WAIT_SECS) {
+        if wait_exit(image, FORCE_WAIT_SECS) {
             return Ok(());
         }
     }
-    Err("无法关闭 WorkBuddy 进程，请手动结束后重试".to_string())
+    Err(format!("无法关闭 {image} 进程，请手动结束后重试"))
 }
 
-fn wait_exit(timeout_secs: u64) -> bool {
+fn wait_exit(image: &str, timeout_secs: u64) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
-        if !workbuddy_running() {
+        if !workbuddy_running(image) {
             return true;
         }
         if std::time::Instant::now() >= deadline {
@@ -309,11 +312,13 @@ fn launch_workbuddy(exe_path: &str) -> Result<(), String> {
 
 /// 一键切换编排：备份 → 关进程 → 写认证 → 启动。
 /// 写认证失败时从备份还原并尽量拉起客户端，不带病前进。
+/// 档位由账号 domain 决定：国内写 workbuddy-desktop.info / 国际写 workbuddy-desktop-ai.info。
 pub fn switch_to_client(acc: &Account, exe_path: &str) -> Result<String, String> {
-    let auth_path = auth_file_path()?;
+    let variant = variant_of(acc);
+    let auth_path = auth_file_path(variant)?;
     let backup = backup_auth_file(&auth_path);
 
-    close_workbuddy()?;
+    close_workbuddy(variant)?;
 
     if let Err(e) = write_account_to_auth_file(acc, &auth_path) {
         // 原子写正常不会留半文件，但 rename 前目标已被删除的极端情况存在：尽力还原
@@ -321,12 +326,12 @@ pub fn switch_to_client(acc: &Account, exe_path: &str) -> Result<String, String>
             let _ = std::fs::copy(bak, &auth_path);
         }
         let _ = launch_workbuddy(exe_path);
-        return Err(format!("{e}（已还原原认证文件并尝试重启 WorkBuddy）"));
+        return Err(format!("{e}（已还原原认证文件并尝试重启客户端）"));
     }
 
     launch_workbuddy(exe_path)?;
     Ok(match backup {
-        Some(p) => format!("已切换并重启 WorkBuddy（原认证已备份到 {}）", p.display()),
-        None => "已切换并重启 WorkBuddy".to_string(),
+        Some(p) => format!("已切换并重启客户端（原认证已备份到 {}）", p.display()),
+        None => "已切换并重启客户端".to_string(),
     })
 }

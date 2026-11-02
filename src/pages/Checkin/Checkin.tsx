@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Play, RefreshCw } from "lucide-react";
 import { PageHeader } from "@/components/PageHeader/PageHeader";
 import { Button } from "@/components/Button/Button";
@@ -26,7 +26,7 @@ export function CheckinPage() {
   const [results, setResults] = useState<Record<string, CheckinResult>>({});
 
   // 全屏 loading 仅首次挂载；签到完成后原地更新，避免整页拆建抖动
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
       const [accs, records] = await Promise.all([
         api.listAccounts(),
@@ -47,20 +47,22 @@ export function CheckinPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [platform, pushToast]);
 
   useEffect(() => {
     // 切产品只重置选中项：results 里可能还有正在跑或已完成的签到结果，不能清掉
     setSelected(new Set());
     load();
-  }, [platform]);
+  }, [load]);
 
   const filtered = accounts.filter((a) => a.platform === platform);
   const now = Date.now() / 1000;
   const boundary = checkinDayStart();
-  const isSigned = (a: AccountInfo) => a.last_checkin_time >= boundary;
-  const isExpired = (a: AccountInfo) =>
-    a.token_expires_at > 0 && a.token_expires_at < now;
+  const isSigned = useCallback((a: AccountInfo) => a.last_checkin_time >= boundary, [boundary]);
+  const isExpired = useCallback(
+    (a: AccountInfo) => a.token_expires_at > 0 && a.token_expires_at < now,
+    [now]
+  );
 
   // 参与签到的目标账号
   const targets = useMemo(() => {
@@ -68,7 +70,7 @@ export function CheckinPage() {
     if (skipSigned) list = list.filter((a) => !isSigned(a));
     if (skipExpired) list = list.filter((a) => !isExpired(a));
     return list;
-  }, [scope, selected, skipSigned, skipExpired, filtered]);
+  }, [scope, selected, skipSigned, skipExpired, filtered, isSigned, isExpired]);
 
   const toggle = (id: string) => {
     setSelected((s) => {
@@ -115,6 +117,8 @@ export function CheckinPage() {
     );
     setRunning(false);
     load();
+    // 通知总览等订阅页刷新签到状态
+    useUIStore.getState().bumpCheckin();
   };
 
   if (loading) {

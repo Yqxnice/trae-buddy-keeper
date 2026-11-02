@@ -21,8 +21,8 @@ fn data_root() -> Result<PathBuf, String> {
 
 /// 固定 15 项载体白名单（相对数据根；目录条目整树处理，缓存类子目录跳过）
 const WHITELIST: [&str; 15] = [
-    "User/globalStorage/storage.json",   // 登录态键 + 设备遥测
-    "User/globalStorage/state.vscdb",    // SQLite：登录令牌真源
+    "User/globalStorage/storage.json", // 登录态键 + 设备遥测
+    "User/globalStorage/state.vscdb",  // SQLite：登录令牌真源
     "User/globalStorage/state.vscdb-wal",
     "User/globalStorage/state.vscdb-shm",
     "User/globalStorage/state.vscdb.backup",
@@ -40,10 +40,22 @@ const WHITELIST: [&str; 15] = [
 
 /// 与登录态无关的缓存/日志目录（对齐参考实现的默认排除清单）
 const EXCLUDE_DIRS: [&str; 16] = [
-    "Cache", "CachedData", "CachedConfigurations", "CachedProfilesData",
-    "Code Cache", "GPUCache", "Crashpad", "DawnGraphiteCache", "DawnWebGPUCache",
-    "ShaderCache", "Dictionaries", "blob_storage", "Service Worker",
-    "Shared Dictionary", "logs", "Backups",
+    "Cache",
+    "CachedData",
+    "CachedConfigurations",
+    "CachedProfilesData",
+    "Code Cache",
+    "GPUCache",
+    "Crashpad",
+    "DawnGraphiteCache",
+    "DawnWebGPUCache",
+    "ShaderCache",
+    "Dictionaries",
+    "blob_storage",
+    "Service Worker",
+    "Shared Dictionary",
+    "logs",
+    "Backups",
 ];
 
 /// 登录凭据键：两把都存在且非空才视为「已登录」
@@ -111,7 +123,9 @@ fn is_excluded_dir(name: &str) -> bool {
 
 /// 递归枚举 root 下全部文件（跳过缓存/日志类目录）
 fn enumerate_tree(root: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(root) else { return };
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return;
+    };
     for entry in rd.flatten() {
         let p = entry.path();
         if p.is_dir() {
@@ -167,7 +181,10 @@ fn restore_entry_set(src_root: &Path, dst_root: &Path) -> Result<(), String> {
         std::fs::remove_file(&lock).map_err(|e| format!("删除 code.lock 失败: {e}"))?;
     }
     // 边车不删，客户端启动回放旧账号 WAL——「切了等于没切」的直接来源
-    for side in ["User/globalStorage/state.vscdb-wal", "User/globalStorage/state.vscdb-shm"] {
+    for side in [
+        "User/globalStorage/state.vscdb-wal",
+        "User/globalStorage/state.vscdb-shm",
+    ] {
         let p = dst_root.join(side);
         if p.exists() {
             std::fs::remove_file(&p).map_err(|e| format!("删除 {} 失败: {e}", p.display()))?;

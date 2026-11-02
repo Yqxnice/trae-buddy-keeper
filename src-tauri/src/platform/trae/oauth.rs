@@ -93,8 +93,8 @@ fn pkce_pair() -> (String, String) {
     let mut bytes = [0u8; 48];
     rand::thread_rng().fill_bytes(&mut bytes);
     let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
-    let challenge =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()));
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(sha2::Sha256::digest(verifier.as_bytes()));
     (verifier, challenge)
 }
 
@@ -213,7 +213,7 @@ const SUCCESS_HTML: &str = r#"<!doctype html>
 <div class="card">
   <div class="icon">&#9989;</div>
   <h1>授权成功</h1>
-  <p>已捕获登录凭证，请返回「AI 账户管家」。</p>
+  <p>已捕获登录凭证，请返回「TraeBuddy Keeper」。</p>
 </div>
 </body>
 </html>"#;
@@ -244,7 +244,9 @@ async fn probe_fallback(req: axum::extract::Request) -> Response {
         "[oauth] 探测请求 {} {} upgrade={:?}",
         req.method(),
         req.uri(),
-        req.headers().get(header::UPGRADE).and_then(|v| v.to_str().ok())
+        req.headers()
+            .get(header::UPGRADE)
+            .and_then(|v| v.to_str().ok())
     );
     with_cors("ok")
 }
@@ -283,8 +285,8 @@ pub async fn ensure_server_running(app: &AppHandle, server: &OAuthServer) -> Res
             Ok(listener) => {
                 eprintln!("[oauth] 回调服务器已监听 {}", addr);
                 let (tx, rx) = oneshot::channel::<()>();
-                let server_fut = axum::serve(listener, make_router())
-                    .with_graceful_shutdown(async move {
+                let server_fut =
+                    axum::serve(listener, make_router()).with_graceful_shutdown(async move {
                         let _ = rx.await;
                     });
                 handle.shutdown_txs.push(tx);
@@ -450,7 +452,11 @@ fn parse_callback(callback_url: &str) -> Result<CallbackInfo, String> {
         if let Some(err) = params.get("error").or_else(|| params.get("errorCode")) {
             return Err(format!("授权失败: {err}"));
         }
-        if params.get("isRedirect").map(|v| v == "false").unwrap_or(false) {
+        if params
+            .get("isRedirect")
+            .map(|v| v == "false")
+            .unwrap_or(false)
+        {
             return Err("授权未完成（isRedirect=false）：授权被取消或设备绑定被拒".to_string());
         }
         // 诊断：记录 authCodeInfo 原始值（截断），便于确认内部结构
@@ -618,7 +624,10 @@ async fn exchange_auth_code(
     // 候选 origin：官方两把账号 API 钉在最前，loginHost 派生的垫后
     let mut origins: Vec<String> = EXCHANGE_ORIGINS.iter().map(|s| s.to_string()).collect();
     if let Some(host) = login_host {
-        let host = host.trim().trim_start_matches("http://").trim_start_matches("https://");
+        let host = host
+            .trim()
+            .trim_start_matches("http://")
+            .trim_start_matches("https://");
         let host = host.split(['/', '?']).next().unwrap_or("");
         if !host.is_empty() {
             origins.push(format!("https://{host}"));
@@ -685,10 +694,7 @@ pub async fn complete_trae_oauth(
         }
         (None, None) => {
             // 授权码模式：需要当轮 PKCE verifier 与设备指纹
-            let code = info
-                .auth_code
-                .clone()
-                .ok_or("回调 URL 中缺少授权材料")?;
+            let code = info.auth_code.clone().ok_or("回调 URL 中缺少授权材料")?;
             let ctx = {
                 let guard = server.0.lock().unwrap_or_else(|e| e.into_inner());
                 guard.ctx.clone()
@@ -704,10 +710,13 @@ pub async fn complete_trae_oauth(
     // 签到与后续续期都必须沿用，必须一并落库
     let login_identity = {
         let guard = server.0.lock().unwrap_or_else(|e| e.into_inner());
-        guard
-            .ctx
-            .as_ref()
-            .map(|ctx| (ctx.device_id.clone(), ctx.device_key.clone(), ctx.machine_id.clone()))
+        guard.ctx.as_ref().map(|ctx| {
+            (
+                ctx.device_id.clone(),
+                ctx.device_key.clone(),
+                ctx.machine_id.clone(),
+            )
+        })
     };
 
     // 同一 token 已存在则更新而不是重复添加
@@ -739,8 +748,8 @@ pub async fn complete_trae_oauth(
         return Ok(format!("账户「{}」凭据已更新", existing.name));
     }
 
-    let (login_device_id, login_device_key, login_machine_id) = login_identity
-        .unwrap_or_else(|| (String::new(), String::new(), String::new()));
+    let (login_device_id, login_device_key, login_machine_id) =
+        login_identity.unwrap_or_else(|| (String::new(), String::new(), String::new()));
 
     let display_name = name
         .filter(|n| !n.trim().is_empty())
@@ -775,9 +784,11 @@ pub async fn complete_trae_oauth(
         credits_fetched_at: 0,
     };
     state.db.insert_account(&acc).map_err(|e| e.to_string())?;
-    state
-        .db
-        .log("success", "登录", &format!("TRAE 网页授权成功：{}", display_name));
+    state.db.log(
+        "success",
+        "登录",
+        &format!("TRAE 网页授权成功：{}", display_name),
+    );
     stop_server_inner(&server);
     Ok(format!("账户「{}」已添加", display_name))
 }

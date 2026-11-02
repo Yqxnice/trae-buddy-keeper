@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { RefreshCw, Package } from "lucide-react";
 import { PageHeader } from "@/components/PageHeader/PageHeader";
 import { Button } from "@/components/Button/Button";
@@ -21,7 +21,7 @@ export function CreditsPage() {
   const [refreshing, setRefreshing] = useState(false);
 
   // 全屏 loading 仅首次挂载生效
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
       setData(await api.getCreditPackages(platform));
     } catch (e: any) {
@@ -29,11 +29,11 @@ export function CreditsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [platform, pushToast]);
 
   useEffect(() => {
     load();
-  }, [platform]);
+  }, [load]);
 
   // 两个平台都有真实积分接口；原地更新数据，成功/失败均 toast
   const handleRefresh = async () => {
@@ -127,7 +127,9 @@ export function CreditsPage() {
                   const days = daysLeft(p.at);
                   return (
                     <div className="pkg-row" key={i}>
-                      <span className="pkg-label">积分包</span>
+                      <span className="pkg-label" title={p.name || undefined}>
+                        {p.name || "积分包"}
+                      </span>
                       <Meter small value={(p.amount / maxPkg) * 100} />
                       <span className="pkg-val">{p.amount.toLocaleString()} 积分</span>
                       <span className={`pkg-exp${days < 1 ? " bad" : days < 7 ? " warn" : ""}`}>

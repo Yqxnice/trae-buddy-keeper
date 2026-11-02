@@ -63,8 +63,14 @@ impl Scheduler {
                 self.renew_expiring().await;
             }
             let settings = load_checkin_settings(&self.db);
+            // 平台范围：空 = 全部平台，否则仅签到勾选的平台
+            let scope: Option<Vec<String>> = if settings.platforms.is_empty() {
+                None
+            } else {
+                Some(settings.platforms.clone())
+            };
             if settings.enabled {
-                let now_min = now.hour() as u32 * 60 + now.minute() as u32;
+                let now_min = now.hour() * 60 + now.minute();
                 let target_min = settings.hour * 60 + settings.minute;
                 // 到达设定时间（分钟匹配）
                 if now_min == target_min && now.second() < 5 {
@@ -76,7 +82,12 @@ impl Scheduler {
                         .unwrap_or_default();
                     let today = format!("{}", now.format("%Y-%m-%d"));
                     if last_batch != today {
-                        let results = self.checkin.checkin_all(None).await.unwrap_or_default();
+                        let results = self
+                            .checkin
+                            .checkin_all(scope.as_deref())
+                            .await
+                            .unwrap_or_default();
+                        self.notifier.emit_checkin_done();
                         let skipped = results.iter().filter(|r| r.skipped).count();
                         let success = results.iter().filter(|r| r.success && !r.skipped).count();
                         let failed = results.len() - success - skipped;
@@ -92,9 +103,12 @@ impl Scheduler {
                         let _ = self.db.set_setting("last_batch_checkin_date", &today);
                     }
                 }
-                // 超时补签：每 10 分钟检查一次未签到的
+                // 超时补签：每 10 分钟检查一次未签到的（同样受平台范围约束）
                 if now.minute() % 10 == 0 && now.second() < 5 {
-                    let _ = self.checkin.retry_missed(None).await;
+                    match self.checkin.retry_missed(scope.as_deref()).await {
+                        Ok(results) if !results.is_empty() => self.notifier.emit_checkin_done(),
+                        _ => {}
+                    }
                 }
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;

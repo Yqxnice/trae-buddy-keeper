@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Dialog } from "@/components/Dialog/Dialog";
 import { Button } from "@/components/Button/Button";
 import "./ConfirmDialog.css";
@@ -26,7 +26,13 @@ export function confirmDialog(opts: Options): Promise<boolean> {
 /** 常驻宿主：App 挂载一次即可，全局 Promise 式调用 */
 export function ConfirmHost() {
   const [state, setState] = useState<State | null>(null);
-  openConfirm = setState;
+  // 在 effect 中注册全局入口（渲染期直接赋值会被 react-hooks/purity 拦截）
+  useEffect(() => {
+    openConfirm = setState;
+    return () => {
+      openConfirm = null;
+    };
+  }, []);
 
   const close = (ok: boolean) => {
     state?.resolve(ok);

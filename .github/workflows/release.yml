@@ -48,6 +48,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install frontend dependencies
+        # 显式指定官方源：不依赖 runner 默认配置，也避免 lock 中残留的镜像地址影响安装
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
         run: npm ci
 
       - name: 同步版本号（以标签为准）

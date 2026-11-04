@@ -592,7 +592,7 @@ export function AccountsPage() {
                           : blocked === "cooling"
                           ? `冷却中 · 至 ${formatDate(acc.cooldown_until)}`
                           : blocked === "signed"
-                            ? "今日已签到，明日 06:00 后可再签"
+                            ? "今日已签到，明日 00:00 后可再签"
                             : blocked === "expired"
                               ? "凭证已失效，请先续期"
                               : "立即签到"

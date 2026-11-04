@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use chrono::{Local, Utc};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use uuid::Uuid;
 
 pub mod data;
@@ -14,7 +14,7 @@ pub mod services;
 use crate::data::db::Database;
 use crate::data::models::*;
 use crate::infra::notification::Notifier;
-use crate::services::checkin::{load_checkin_settings, CheckinService};
+use crate::services::checkin::{load_checkin_settings, CheckinService, CheckinSource};
 use crate::services::scheduler::Scheduler;
 use crate::services::token::TokenManager;
 
@@ -28,19 +28,76 @@ pub struct AppState {
     pub data_dir: std::path::PathBuf,
 }
 
+/// 项目仓库地址（与 README 及更新端点保持一致）
+pub const PROJECT_REPO_URL: &str = "https://github.com/Yqxnice/trae-buddy-keeper";
+
+/// 托盘/单实例/启动共用的主窗口呼出：还原最小化 → 主显示器居中 → 显示 → 聚焦。
+/// 居中放在 show 之前，避免窗口先在旧位置闪一下再跳到屏幕中央。
+pub(crate) fn show_main_window(app: &tauri::AppHandle) {
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
+    let _ = win.unminimize();
+    center_on_primary_monitor(&win);
+    let _ = win.show();
+    let _ = win.set_focus();
+}
+
+/// 按主显示器居中（多显示器时固定回主屏，而不是停留在副屏边缘）。
+/// 主显示器信息拿不到时退回窗口自身的 center。
+fn center_on_primary_monitor(win: &tauri::WebviewWindow) {
+    let Some(monitor) = win.primary_monitor().ok().flatten() else {
+        let _ = win.center();
+        return;
+    };
+    let Ok(size) = win.outer_size() else {
+        return;
+    };
+    let origin = monitor.position();
+    let area = monitor.size();
+    // outer_size / position / size 均为物理像素，直接做整数运算
+    let x = origin.x + (area.width as i32 - size.width as i32) / 2;
+    let y = origin.y + (area.height as i32 - size.height as i32) / 2;
+    let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 单实例插件必须最先注册：它在插件 setup 阶段（早于主窗口创建、托盘与定时任务
+        // 初始化）就建立互斥量，第二实例在该阶段即静默退出，不会再执行 setup 中的任何初始化
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // 自启动拉起的第二实例（开机自启与手动点击撞车）只让位、不抢焦点
+            if argv.iter().any(|arg| arg == "--autostart") {
+                return;
+            }
+            // 手动再次启动：恢复并聚焦已在运行的实例（含最小化到托盘/隐藏的情况），并重新居中
+            show_main_window(app);
+            // 启动参数转发给已有实例（前端可按需监听，不监听也不影响）
+            let _ = app.emit("single-instance-args", argv);
+        }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec![]),
+            // 自启动项带上标记参数，供单实例回调区分「手动启动」与「开机自启」
+            Some(vec!["--autostart"]),
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let app_dir = app.path().app_data_dir().expect("无法获取应用数据目录");
             std::fs::create_dir_all(&app_dir).ok();
+            // 兼容旧版本注册的自启项（不含 --autostart）：自启处于开启状态时后台重写一次注册项，
+            // 让后续自启动进程能被单实例回调识别为静默启动；用户在任务管理器里禁用自启时不动
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    use tauri_plugin_autostart::ManagerExt as _;
+                    if matches!(handle.autolaunch().is_enabled(), Ok(true)) {
+                        let _ = handle.autolaunch().enable();
+                    }
+                });
+            }
             let db_path = app_dir.join("trae-buddy-keeper.db");
             let db = match Database::new(db_path.to_str().unwrap()) {
                 Ok(d) => Arc::new(d),
@@ -112,8 +169,7 @@ pub fn run() {
             if let Some(win) = app.get_webview_window("main") {
                 // 启动时最小化到托盘（窗口默认不显示，按需显示）
                 if !db.load_app_settings().minimize_to_tray_on_start {
-                    let _ = win.show();
-                    let _ = win.set_focus();
+                    show_main_window(app.handle());
                 }
                 let win_clone = win.clone();
                 win.on_window_event(move |event| {
@@ -138,6 +194,8 @@ pub fn run() {
             get_points_dashboard,
             get_checkin_settings,
             set_checkin_settings,
+            get_credit_schedule,
+            set_credit_schedule,
             get_notification_mode,
             set_notification_mode,
             renew_token,
@@ -163,6 +221,7 @@ pub fn run() {
             get_app_settings,
             get_data_dir,
             open_data_dir,
+            open_project_repo,
             backup_data,
             import_data,
             set_app_settings,
@@ -418,10 +477,13 @@ async fn checkin_one(state: State<'_, AppState>, id: String) -> Result<CheckinRe
 async fn checkin_all(
     state: State<'_, AppState>,
     platform: Option<String>,
+    source: Option<String>,
 ) -> Result<Vec<CheckinResult>, String> {
+    // 来源仅用于日志诊断：托盘传 "tray"，界面按钮不传（默认手动）
+    let src = CheckinSource::from_opt(source.as_deref());
     let results = state
         .checkin
-        .checkin_all(platform.map(|p| vec![p]).as_deref())
+        .checkin_all_from(platform.map(|p| vec![p]).as_deref(), src)
         .await?;
     let skipped = results.iter().filter(|r| r.skipped).count();
     let success = results.iter().filter(|r| r.success && !r.skipped).count();
@@ -569,6 +631,21 @@ fn set_checkin_settings(state: State<AppState>, settings: CheckinSettings) -> Re
         .db
         .set_setting("checkin_settings", &json)
         .map_err(|e| e.to_string())
+}
+
+// ===== 定时积分查询 =====
+
+#[tauri::command]
+fn get_credit_schedule(state: State<AppState>) -> CreditScheduleState {
+    crate::services::credit_schedule::load_state(&state.db)
+}
+
+#[tauri::command]
+fn set_credit_schedule(
+    state: State<AppState>,
+    settings: CreditScheduleSettings,
+) -> Result<(), String> {
+    crate::services::credit_schedule::save_settings(&state.db, &settings)
 }
 
 #[tauri::command]
@@ -725,6 +802,16 @@ fn open_data_dir(state: State<AppState>) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+/// 打开项目仓库（设置页命令与托盘菜单共用同一份逻辑与地址）
+pub(crate) fn open_project_repo_url() -> Result<(), String> {
+    open::that_detached(PROJECT_REPO_URL).map_err(|e| format!("打开仓库链接失败: {e}"))
+}
+
+#[tauri::command]
+fn open_project_repo() -> Result<(), String> {
+    open_project_repo_url()
 }
 
 #[tauri::command]

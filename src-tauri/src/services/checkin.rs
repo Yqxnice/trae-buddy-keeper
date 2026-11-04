@@ -1,26 +1,161 @@
 use chrono::{Datelike, Local, Utc};
 use std::collections::HashSet;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 use crate::data::db::Database;
 use crate::data::models::*;
 use crate::platform::trae::api as trae_api;
 use crate::platform::workbuddy::api as workbuddy_api;
+use crate::services::account_lock;
 
 /// 9074/9095 语义：9074=该设备号被上游限流/拉黑，9095=该设备今日已签到
 const TRAE_MASTER_RISK_CODE: &str = "code=9074";
 /// 9074 时换设备号的总尝试次数（含第一次原号）
 const TRAE_9074_MAX_ATTEMPTS: usize = 3;
 
+/// 签到批次锁异常占用上限（秒）：超过此值仍被占用，视为持有者已异常
+/// （panic 未走到 Drop、任务被丢弃、进程挂起等），允许带 warning 强制回收一次。
+const BATCH_STALE_SECS: i64 = 7200;
+/// 并发批次排队等待上限（秒）：撞车批次先等正在运行的批次结束，超时后带
+/// warning 强制接管继续执行，宁可短暂重叠也不让账号当天漏签。
+const BATCH_WAIT_MAX_SECS: u64 = 180;
+/// 排队等待的轮询间隔（毫秒）
+const BATCH_WAIT_POLL_MS: u64 = 2000;
+
 /// 设备号形态：12~20 位纯数字（客户端注册过的 Aha 设备号，15/16 位常见但非规则）
 fn is_aha_device(s: &str) -> bool {
     matches!(s.len(), 12..=20) && s.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// 签到触发来源：仅用于日志诊断，区分自动与人工触发
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckinSource {
+    /// 界面按钮（单账号 / 批量）
+    Manual,
+    /// 托盘菜单「一键签到」
+    Tray,
+    /// 定时任务到点批量
+    Scheduled,
+    /// 应用启动后的一次性补签
+    Startup,
+    /// 定时补签巡检
+    CatchUp,
+}
+
+impl CheckinSource {
+    /// IPC 传入的来源字符串 → 枚举（未知值回退手动）
+    pub fn from_opt(source: Option<&str>) -> Self {
+        match source.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("tray") => Self::Tray,
+            Some("scheduled") => Self::Scheduled,
+            Some("startup") => Self::Startup,
+            Some("catchup") => Self::CatchUp,
+            _ => Self::Manual,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "手动",
+            Self::Tray => "托盘",
+            Self::Scheduled => "定时任务",
+            Self::Startup => "启动补签",
+            Self::CatchUp => "补签",
+        }
+    }
+}
+
+/// 批次锁持有凭证：只有持有者本人能释放，被强制回收后旧凭证自动失效
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BatchToken(u64);
+
+struct BatchLease {
+    token: u64,
+    started_at: i64,
+}
+
+/// 签到批次互斥锁（只保护极短的临界区，因此用同步 Mutex，不是 async 锁）。
+///
+/// 释放按 token 幂等：只有当前持有者的 token 能清空占用；一旦被强制回收，
+/// 旧持有者的 Drop 因 token 不匹配变成 no-op，不会误释放新持有者。
+pub struct CheckinBatchLock {
+    lease: Mutex<Option<BatchLease>>,
+    next_token: AtomicU64,
+}
+
+impl CheckinBatchLock {
+    fn new() -> Self {
+        Self {
+            lease: Mutex::new(None),
+            next_token: AtomicU64::new(1),
+        }
+    }
+
+    fn lock_lease(&self) -> std::sync::MutexGuard<'_, Option<BatchLease>> {
+        // 锁内没有会在 panic 时留下不一致状态的操作，毒锁按正常值恢复
+        self.lease.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 立即尝试获取；已有持有者时返回 None（不等待）
+    fn try_acquire(&self) -> Option<BatchToken> {
+        let mut lease = self.lock_lease();
+        if lease.is_some() {
+            return None;
+        }
+        let token = BatchToken(self.next_token.fetch_add(1, Ordering::SeqCst));
+        *lease = Some(BatchLease {
+            token: token.0,
+            started_at: Utc::now().timestamp(),
+        });
+        Some(token)
+    }
+
+    /// 强制回收当前占用（自愈）；返回被回收的占用时长（秒）
+    fn force_reclaim(&self) -> Option<i64> {
+        let mut lease = self.lock_lease();
+        lease
+            .take()
+            .map(|l| Utc::now().timestamp().saturating_sub(l.started_at))
+    }
+
+    /// 释放：token 不匹配说明已被强制回收（或已释放过），直接忽略
+    fn release(&self, token: BatchToken) {
+        let mut lease = self.lock_lease();
+        if lease.as_ref().map(|l| l.token) == Some(token.0) {
+            *lease = None;
+        }
+    }
+
+    /// 当前占用已持续秒数；未占用返回 None
+    pub fn held_for(&self) -> Option<i64> {
+        let lease = self.lock_lease();
+        lease
+            .as_ref()
+            .map(|l| Utc::now().timestamp().saturating_sub(l.started_at))
+    }
+
+    /// 是否有签到批次正在执行（供积分定时查询让位）
+    pub fn is_active(&self) -> bool {
+        self.lock_lease().is_some()
+    }
+}
+
+/// 批次锁 RAII 守卫：Drop 时自动释放，panic 展开路径也能回收
+pub struct CheckinBatchGuard {
+    lock: Arc<CheckinBatchLock>,
+    token: BatchToken,
+}
+
+impl Drop for CheckinBatchGuard {
+    fn drop(&mut self) {
+        self.lock.release(self.token);
+    }
+}
+
 /// 平台范围匹配：勾选 workbuddy 时同时覆盖 codebuddy_cn（同一账号体系）
-fn platform_in_scope(platform: &str, scope: &[String]) -> bool {
+pub(crate) fn platform_in_scope(platform: &str, scope: &[String]) -> bool {
     scope
         .iter()
         .any(|p| p == platform || (p == "workbuddy" && platform == "codebuddy_cn"))
@@ -40,7 +175,7 @@ fn derived_device_id(seed: &str) -> String {
 
 pub struct CheckinService {
     db: Arc<Database>,
-    running: Arc<Mutex<bool>>,
+    batch_lock: Arc<CheckinBatchLock>,
     /// 应用数据目录（读账号 vault 里客户端真实设备号用）
     data_dir: std::path::PathBuf,
 }
@@ -49,13 +184,32 @@ impl CheckinService {
     pub fn new(db: Arc<Database>, data_dir: std::path::PathBuf) -> Self {
         CheckinService {
             db,
-            running: Arc::new(Mutex::new(false)),
+            batch_lock: Arc::new(CheckinBatchLock::new()),
             data_dir,
         }
     }
 
-    // 单账户签到（含冷却与隔离判断）
+    /// 批次锁句柄：供定时积分查询判断「签到是否正在进行」并让位
+    pub fn batch_lock(&self) -> Arc<CheckinBatchLock> {
+        self.batch_lock.clone()
+    }
+
+    // 单账户签到（手动入口，来源记为手动）
     pub async fn checkin_one(&self, account_id: &str) -> Result<CheckinResult, String> {
+        self.checkin_one_from(account_id, CheckinSource::Manual)
+            .await
+    }
+
+    // 单账户签到（含冷却与隔离判断）；source 仅用于日志区分触发来源
+    pub async fn checkin_one_from(
+        &self,
+        account_id: &str,
+        source: CheckinSource,
+    ) -> Result<CheckinResult, String> {
+        // 账号级互斥：与积分查询共用，保证同一账号同一时刻只有一个上游请求。
+        // 签到优先——即使积分查询正在请求该账号，也只需等它这一条请求结束。
+        // 守卫持有到函数结束（包含落库与签到后积分刷新），保证状态对其他批次可见
+        let account_guard = account_lock::acquire_account(account_id).await;
         let acc = self
             .db
             .get_account(account_id)
@@ -105,7 +259,7 @@ impl CheckinService {
                 message: format!("冷却中，剩余 {} 秒", acc.cooldown_until - now),
             });
         }
-        // 3) 今日已签到（6 点边界）
+        // 3) 今日已签到（本地自然日边界）
         if checked_in_today(acc.last_checkin_time) {
             let _ = self.db.update_account_checkin(
                 &acc.id,
@@ -147,7 +301,13 @@ impl CheckinService {
         self.db.log(
             if success { "success" } else { "error" },
             "签到",
-            &format!("[{}] {}：{}", acc.platform, acc.name, message),
+            &format!(
+                "[{}] {}：{}（{}）",
+                acc.platform,
+                acc.name,
+                message,
+                source.label()
+            ),
         );
 
         if success {
@@ -178,8 +338,15 @@ impl CheckinService {
                 };
                 let _ = self.db.insert_points_history(&ph);
             }
-            // 签到后刷新真实积分（失败不影响签到结果）
-            let _ = crate::platform::workbuddy::credits::refresh_account(&self.db, &acc.id).await;
+            // 签到后刷新真实积分（失败不影响签到结果）：复用已持有的账号锁，
+            // 否则会被自身的 try 锁挡掉，每次签到都写一条「已跳过积分查询」
+            let _ = crate::platform::workbuddy::credits::refresh_account_with_action_guarded(
+                &self.db,
+                &acc.id,
+                "积分查询",
+                account_guard,
+            )
+            .await;
         } else {
             let mut new_fail = acc.fail_count + 1;
             let settings = load_checkin_settings(&self.db);
@@ -256,19 +423,30 @@ impl CheckinService {
         }
     }
 
-    // 批量签到（可按平台过滤）
-    /// 批量签到；platforms 为 None 时签到全部平台，否则仅签到范围内的平台
+    /// 批量签到（手动入口，来源记为手动）
     pub async fn checkin_all(
         &self,
         platforms: Option<&[String]>,
     ) -> Result<Vec<CheckinResult>, String> {
-        let mut lock = self.running.lock().await;
-        if *lock {
-            return Err("已有签到任务在执行中".to_string());
-        }
-        *lock = true;
-        drop(lock);
+        self.checkin_all_from(platforms, CheckinSource::Manual).await
+    }
 
+    /// 批量签到；platforms 为 None 时签到全部平台，否则仅签到范围内的平台
+    pub async fn checkin_all_from(
+        &self,
+        platforms: Option<&[String]>,
+        source: CheckinSource,
+    ) -> Result<Vec<CheckinResult>, String> {
+        // RAII：正常返回或 panic 展开都会释放批次锁
+        let _guard = self.acquire_batch_guard(source).await;
+        self.do_checkin_all(platforms, source).await
+    }
+
+    async fn do_checkin_all(
+        &self,
+        platforms: Option<&[String]>,
+        source: CheckinSource,
+    ) -> Result<Vec<CheckinResult>, String> {
         let mut accounts = self.db.list_accounts().map_err(|e| e.to_string())?;
         // 国际版无签到接口，不进批量签到队列
         accounts.retain(|a| {
@@ -284,7 +462,7 @@ impl CheckinService {
 
         for acc in &accounts {
             let r = self
-                .checkin_one(&acc.id)
+                .checkin_one_from(&acc.id, source)
                 .await
                 .unwrap_or_else(|e| CheckinResult {
                     account_id: acc.id.clone(),
@@ -312,10 +490,80 @@ impl CheckinService {
             tokio::time::sleep(std::time::Duration::from_secs(gap)).await;
         }
 
-        let mut lock = self.running.lock().await;
-        *lock = false;
         Ok(results)
     }
+
+    /// 抢占签到批次（有限排队 + 超时接管 + 异常自愈）：
+    /// - 无占用：立即获取，返回 RAII 守卫（Drop 释放，panic 展开也能回收）；
+    /// - 有占用且未超过异常上限：每 2 秒轮询，最多等待 BATCH_WAIT_MAX_SECS，
+    ///   让撞车批次先等正在运行的批次结束，避免并发重复请求；
+    /// - 占用超过 BATCH_STALE_SECS（异常路径未释放/任务丢失）：warning 后强制回收一次；
+    /// - 等待超过上限：warning 后强制接管继续执行，宁可短暂重叠也不让账号当天漏签。
+    ///   重叠期间由账号级互斥 + 每次签到前重新读库（checked_in_today）保证不会
+    ///   并发请求同一账号，已签过的账号会被自动跳过。
+    ///
+    /// 永不因「已有批次在跑」直接失败：这样定时/启动补签/巡检/手动都不会被跳过。
+    async fn acquire_batch_guard(&self, source: CheckinSource) -> CheckinBatchGuard {
+        let started = std::time::Instant::now();
+        let wait_limit = std::time::Duration::from_secs(BATCH_WAIT_MAX_SECS);
+        let mut wait_noted = false;
+        loop {
+            if let Some(token) = self.batch_lock.try_acquire() {
+                return CheckinBatchGuard {
+                    lock: self.batch_lock.clone(),
+                    token,
+                };
+            }
+            // 自愈：占用时间明显超过一次批量的合理上限，说明持有者异常
+            if let Some(held) = self.batch_lock.held_for() {
+                if held > BATCH_STALE_SECS {
+                    if let Some(held) = self.batch_lock.force_reclaim() {
+                        self.db.log(
+                            "warning",
+                            "签到",
+                            &format!(
+                                "签到批次锁异常占用 {} 秒（上限 {} 秒），已强制回收",
+                                held, BATCH_STALE_SECS
+                            ),
+                        );
+                        continue;
+                    }
+                }
+            }
+            if started.elapsed() >= wait_limit {
+                // 有限等待已到上限：接管继续执行（账号级互斥保证不重复请求）
+                if let Some(held) = self.batch_lock.force_reclaim() {
+                    self.db.log(
+                        "warning",
+                        "签到",
+                        &format!(
+                            "[{}] 等待已有签到批次 {} 秒仍未结束，已强制接管继续执行",
+                            source.label(),
+                            held
+                        ),
+                    );
+                }
+                continue;
+            }
+            if !wait_noted {
+                wait_noted = true;
+                self.db.log(
+                    "info",
+                    "签到",
+                    &format!(
+                        "[{}] 已有签到批次在执行（已持续 {} 秒），本批次排队等待（最多 {} 秒）",
+                        source.label(),
+                        self.batch_lock.held_for().unwrap_or(0),
+                        BATCH_WAIT_MAX_SECS
+                    ),
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(BATCH_WAIT_POLL_MS)).await;
+        }
+    }
+
+    // 签到批次互斥只约束签到自身的批量/补签路径；积分查询改用账号级互斥，
+    // 并通过 batch_lock().is_active() 检测签到批量后主动让位。
 
     /// TRAE 签到设备号：优先库里已存的固定号；缺失时才从账号 vault 的客户端真实号补齐，
     /// 再不行按账号种子派生。9074 后会把失败号轮换掉（见 trae_checkin）。
@@ -481,11 +729,21 @@ impl CheckinService {
         }
     }
 
-    // 超时补签到：检查今天是否有账户未签到
     /// 补签当日未签到的账号；platforms 为 None 时覆盖全部平台
     pub async fn retry_missed(
         &self,
         platforms: Option<&[String]>,
+        source: CheckinSource,
+    ) -> Result<Vec<CheckinResult>, String> {
+        // RAII：正常返回或 panic 展开都会释放批次锁
+        let _guard = self.acquire_batch_guard(source).await;
+        self.do_retry_missed(platforms, source).await
+    }
+
+    async fn do_retry_missed(
+        &self,
+        platforms: Option<&[String]>,
+        source: CheckinSource,
     ) -> Result<Vec<CheckinResult>, String> {
         let accounts = self.db.list_accounts().map_err(|e| e.to_string())?;
         let accounts: Vec<_> = accounts
@@ -507,11 +765,12 @@ impl CheckinService {
         let mut results = Vec::new();
         let settings = load_checkin_settings(&self.db);
         for acc in &accounts {
+            // 今日已成功签到的账号不再发起请求：这是「一天只签一次」的硬门槛
             if !checked_in_today(acc.last_checkin_time)
                 && acc.cooldown_until <= now
                 && !is_expired(acc, now)
             {
-                if let Ok(r) = self.checkin_one(&acc.id).await {
+                if let Ok(r) = self.checkin_one_from(&acc.id, source).await {
                     let skipped = r.skipped;
                     results.push(r);
                     if skipped {
@@ -533,21 +792,25 @@ fn is_expired(acc: &Account, now: i64) -> bool {
     acc.token_expires_at > 0 && acc.token_expires_at < now
 }
 
-// 6 点边界：本地时间今日 6 点之后签到才算今天
+// 签到日边界：本地自然日 0 点。上游额度/签到按自然日重置，若跨 0 点仍用
+// 其它边界（如 6 点）会把 0~6 点已成功的签到判成「昨日未签」，导致边界巡检重复请求。
 fn checked_in_today(last_checkin: i64) -> bool {
     if last_checkin == 0 {
         return false;
     }
-    // 今日本地 6 点的时间戳
-    let today_six = Local::now()
+    let now = Local::now();
+    // 用「当天本地日期 + 当前时区偏移」反算日界，而不是把本地 00:00 交给时区解析：
+    // 夏令时切换可能让本地 00:00 不存在或有歧义，single() 会返回 None 并退化成 0，
+    // 从而把所有账号都误判为「今日已签到」。这里任何时区都能得到确定的时间戳。
+    let offset_secs = now.offset().local_minus_utc() as i64;
+    let today_start = now
         .date_naive()
-        .and_hms_opt(6, 0, 0)
-        .unwrap()
-        .and_local_timezone(Local)
-        .single()
-        .map(|dt| dt.timestamp())
-        .unwrap_or(0);
-    last_checkin >= today_six
+        .and_hms_opt(0, 0, 0)
+        .expect("00:00:00 必定是合法时间")
+        .and_utc()
+        .timestamp()
+        - offset_secs;
+    last_checkin >= today_start
 }
 
 fn today_str() -> String {

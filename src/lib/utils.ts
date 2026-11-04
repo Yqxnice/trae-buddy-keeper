@@ -21,16 +21,16 @@ export function platformLabel(p: string): string {
   return "WorkBuddy";
 }
 
-// 签到日边界：本地时间每天 06:00（与后端 checked_in_today 一致）
+// 签到日边界：本地自然日 0 点（与后端 checked_in_today 一致，上游按自然日重置）
 export function checkinDayStart(): number {
   const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 6).getTime() / 1000;
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000;
 }
 
 // 状态章取值（与 Chip 组件五变体对应）
 export type ChipTone = "ok" | "run" | "warn" | "bad" | "idle";
 
-/** 签到状态 → 状态章（success 跨天保留，仅今日 6 点后算「今日已签到」） */
+/** 签到状态 → 状态章（success 跨天保留，仅今日自然日内算「今日已签到」） */
 export function checkinChipInfo(acc: {
   checkin_status: string;
   fail_count: number;

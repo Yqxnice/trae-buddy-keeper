@@ -333,8 +333,45 @@ async fn fetch_enterprise_credits(
     Ok((Some(remaining), expiries, "查询成功".to_string()))
 }
 
-/// 刷新单个账号积分并落库
+/// 刷新单个账号积分并落库（手动/页面刷新入口）
 pub async fn refresh_account(db: &Arc<Database>, account_id: &str) -> CreditResult {
+    refresh_account_with_action(db, account_id, "积分查询").await
+}
+
+/// 刷新单个账号积分并落库；action 为失败日志的来源标识（如「积分定时查询」）
+pub async fn refresh_account_with_action(
+    db: &Arc<Database>,
+    account_id: &str,
+    action: &str,
+) -> CreditResult {
+    // 账号级互斥：与签到共用。积分查询不等待——账号正在签到就直接跳过，绝不阻塞签到
+    match crate::services::account_lock::try_acquire_account(account_id) {
+        Some(guard) => refresh_account_with_action_guarded(db, account_id, action, guard).await,
+        None => {
+            db.log(
+                "info",
+                action,
+                &format!("账号 {} 正在签到/其它请求中，已跳过本次积分查询", account_id),
+            );
+            CreditResult {
+                account_id: account_id.to_string(),
+                account_name: String::new(),
+                success: false,
+                balance: None,
+                expiries: vec![],
+                message: "账号正在其它请求中，已跳过积分查询".to_string(),
+            }
+        }
+    }
+}
+
+/// 已持有账号级互斥时的积分查询实现（guard 在函数结束时自动释放）
+pub async fn refresh_account_with_action_guarded(
+    db: &Arc<Database>,
+    account_id: &str,
+    action: &str,
+    _guard: crate::services::account_lock::AccountGuard,
+) -> CreditResult {
     let acc = match db.get_account(account_id) {
         Ok(Some(a)) => a,
         _ => {
@@ -372,7 +409,7 @@ pub async fn refresh_account(db: &Arc<Database>, account_id: &str) -> CreditResu
             }
         }
         Err(e) => {
-            db.log("error", "积分查询", &format!("{}：{}", acc.name, e));
+            db.log("error", action, &format!("{}：{}", acc.name, e));
             CreditResult {
                 account_id: acc.id.clone(),
                 account_name: acc.name.clone(),

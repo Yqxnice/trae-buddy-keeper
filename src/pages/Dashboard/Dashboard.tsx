@@ -84,7 +84,7 @@ export function Dashboard() {
 
   const mine = accounts.filter((a) => a.platform === platform);
   const boundary = new Date();
-  boundary.setHours(6, 0, 0, 0);
+  boundary.setHours(0, 0, 0, 0);
   const boundaryTs = boundary.getTime() / 1000;
   const done = mine.filter((a) => a.last_checkin_time >= boundaryTs).length;
 

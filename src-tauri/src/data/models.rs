@@ -260,3 +260,42 @@ impl Default for CheckinSettings {
         }
     }
 }
+
+/// 定时积分查询配置：与定时签到并列、互不影响
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreditScheduleSettings {
+    pub enabled: bool,
+    /// 查询间隔（分钟），默认 360（6 小时）
+    pub interval_minutes: u32,
+    /// 平台范围（trae / workbuddy，workbuddy 含 CodeBuddy CN）；空 = 全部平台
+    #[serde(default)]
+    pub platforms: Vec<String>,
+}
+
+impl Default for CreditScheduleSettings {
+    fn default() -> Self {
+        CreditScheduleSettings {
+            // 默认关闭：新装用户不主动产生额外的上游请求
+            enabled: false,
+            interval_minutes: 360,
+            platforms: Vec::new(),
+        }
+    }
+}
+
+/// 最近一次定时积分查询的执行结果
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreditScheduleRun {
+    /// 执行时刻（epoch 秒）
+    pub at: i64,
+    pub success: u32,
+    pub failed: u32,
+    pub message: String,
+}
+
+/// 前端展示用：配置 + 最近一次执行摘要
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreditScheduleState {
+    pub settings: CreditScheduleSettings,
+    pub last_run: CreditScheduleRun,
+}

@@ -109,6 +109,28 @@ export interface CheckinSettings {
   platforms: string[];
 }
 
+/** 定时积分查询配置：与定时签到并列 */
+export interface CreditScheduleSettings {
+  enabled: boolean;
+  /** 查询间隔（分钟），默认 360（6 小时） */
+  interval_minutes: number;
+  /** 平台范围（trae / workbuddy）；空数组 = 全部平台 */
+  platforms: string[];
+}
+
+/** 最近一次定时积分查询的执行摘要 */
+export interface CreditScheduleRun {
+  at: number;
+  success: number;
+  failed: number;
+  message: string;
+}
+
+export interface CreditScheduleState {
+  settings: CreditScheduleSettings;
+  last_run: CreditScheduleRun;
+}
+
 export const api = {
   listAccounts: () => invoke<AccountInfo[]>("list_accounts"),
   getAccountDetail: (id: string) => invoke<Account | null>("get_account_detail", { id }),
@@ -131,14 +153,21 @@ export const api = {
   addAccountImport: (json: string) => invoke<string>("add_account_import", { json }),
   deleteAccount: (id: string) => invoke<void>("delete_account", { id }),
   checkinOne: (id: string) => invoke<CheckinResult>("checkin_one", { id }),
-  checkinAll: (platform?: string) =>
-    invoke<CheckinResult[]>("checkin_all", { platform: platform ?? null }),
+  /** source 仅用于后端日志标注触发来源：托盘传 "tray"，界面按钮不传 */
+  checkinAll: (platform?: string, source?: "tray" | "scheduled" | "catchup") =>
+    invoke<CheckinResult[]>("checkin_all", {
+      platform: platform ?? null,
+      source: source ?? null,
+    }),
   getCheckinRecords: (accountId?: string, limit = 50) =>
     invoke<CheckinRecord[]>("get_checkin_records", { accountId, limit }),
   getPointsDashboard: (platform: string) =>
     invoke<PointsDashboard>("get_points_dashboard", { platform }),
   getCheckinSettings: () => invoke<CheckinSettings>("get_checkin_settings"),
   setCheckinSettings: (s: CheckinSettings) => invoke<void>("set_checkin_settings", { settings: s }),
+  getCreditSchedule: () => invoke<CreditScheduleState>("get_credit_schedule"),
+  setCreditSchedule: (s: CreditScheduleSettings) =>
+    invoke<void>("set_credit_schedule", { settings: s }),
   getNotificationMode: () => invoke<string>("get_notification_mode"),
   setNotificationMode: (mode: string) => invoke<void>("set_notification_mode", { mode }),
   renewToken: (id: string) => invoke<string>("renew_token", { id }),
@@ -175,6 +204,7 @@ export const api = {
   getAppSettings: () => invoke<AppSettings>("get_app_settings"),
   getDataDir: () => invoke<string>("get_data_dir"),
   openDataDir: () => invoke<void>("open_data_dir"),
+  openProjectRepo: () => invoke<void>("open_project_repo"),
   backupData: () => invoke<string | null>("backup_data"),
   importData: () => invoke<string | null>("import_data"),
   setAppSettings: (settings: AppSettings) =>

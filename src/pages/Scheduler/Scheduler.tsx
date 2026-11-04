@@ -3,11 +3,27 @@ import { RefreshCw, Save, RotateCcw } from "lucide-react";
 import { PageHeader } from "@/components/PageHeader/PageHeader";
 import { Button } from "@/components/Button/Button";
 import { Switch } from "@/components/Switch/Switch";
+import { Select } from "@/components/Select/Select";
 import { NumInput } from "@/components/TextInput/TextInput";
 import { useCheckinStore } from "@/stores/checkin";
+import { useCreditScheduleStore } from "@/stores/credit";
 import { useUIStore } from "@/stores/ui";
-import { platformLabel } from "@/lib/utils";
+import { formatRelative, platformLabel } from "@/lib/utils";
+import type { CreditScheduleSettings } from "@/lib/api";
 import "./Scheduler.css";
+
+/** 积分查询常用间隔档位（分钟） */
+const CREDIT_INTERVAL_OPTIONS = [
+  { value: "30", label: "30 分钟" },
+  { value: "60", label: "1 小时" },
+  { value: "180", label: "3 小时" },
+  { value: "360", label: "6 小时" },
+  { value: "720", label: "12 小时" },
+  { value: "1440", label: "24 小时" },
+];
+
+/** 积分查询可选的平台范围（WorkBuddy 范围含 CodeBuddy CN） */
+const CREDIT_SCOPE_KEYS = ["trae", "workbuddy"] as const;
 
 export function SchedulerPage() {
   const pushToast = useUIStore((s) => s.pushToast);
@@ -15,15 +31,53 @@ export function SchedulerPage() {
   const load = useCheckinStore((s) => s.load);
   const update = useCheckinStore((s) => s.update);
   const save = useCheckinStore((s) => s.save);
+  const credit = useCreditScheduleStore((s) => s.data);
+  const loadCredit = useCreditScheduleStore((s) => s.load);
+  const updateCredit = useCreditScheduleStore((s) => s.update);
+  const saveCredit = useCreditScheduleStore((s) => s.save);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // store 在 App 启动时已加载；此页兜底拉取，保证直接进入本页也有数据
+  const reload = async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      await Promise.all([
+        settings ? Promise.resolve() : load(),
+        credit ? Promise.resolve() : loadCredit(),
+      ]);
+    } catch (e: any) {
+      const msg = e?.toString() || "未知错误";
+      setLoadError(msg);
+      pushToast("加载失败", msg, "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    (settings ? Promise.resolve() : load())
-      .catch((e: any) => pushToast("加载失败", e?.toString(), "error"))
-      .finally(() => setLoading(false));
+    void reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 后台定时任务在页面打开期间可能执行：定期回读最近一次执行摘要
+  useEffect(() => {
+    const timer = setInterval(() => {
+      loadCredit().catch(() => {});
+    }, 60_000);
+    return () => clearInterval(timer);
+  }, [loadCredit]);
+
+  // 修改即保存（与本项目其余设置项一致，不额外加保存按钮）
+  const patchCredit = async (patch: Partial<CreditScheduleSettings>) => {
+    updateCredit(patch);
+    try {
+      await saveCredit();
+    } catch (e: any) {
+      pushToast("保存失败", e?.toString(), "error");
+    }
+  };
 
   const handleSave = async () => {
     if (!settings) return;
@@ -35,10 +89,30 @@ export function SchedulerPage() {
     }
   };
 
-  if (loading || !settings) {
+  if (loading) {
     return (
       <div className="page-loading">
         <RefreshCw className="spin" size={26} strokeWidth={1.6} />
+      </div>
+    );
+  }
+
+  // 加载失败：给出明确提示与重试入口，不要一直停在骨架屏
+  if (!settings || !credit) {
+    return (
+      <div className="sched">
+        <PageHeader
+          title="定时任务"
+          sub="每日自动签到与失败补签 · 托盘「立即签到」不受影响"
+        />
+        <div className="sched-card">
+          <div className="sched-grid">
+            <span className="sched-hint">
+              定时任务配置加载失败{loadError ? `：${loadError}` : "，请重试"}
+            </span>
+            <Button onClick={() => void reload()}>重新加载</Button>
+          </div>
+        </div>
       </div>
     );
   }
@@ -58,6 +132,25 @@ export function SchedulerPage() {
     settings.platforms.length === 0
       ? "全部产品"
       : settings.platforms.map(platformLabel).join(" / ");
+
+  // 积分查询平台范围：空数组同样表示全部平台，UI 上按全选展示
+  const creditScope: string[] =
+    credit.settings.platforms.length > 0
+      ? credit.settings.platforms
+      : [...CREDIT_SCOPE_KEYS];
+  const toggleCreditPlatform = (key: string, on: boolean) => {
+    if (!on && creditScope.length <= 1) {
+      pushToast("无法关闭", "至少保留一个平台参与定时积分查询", "warning");
+      return;
+    }
+    const next = on
+      ? Array.from(new Set([...creditScope, key]))
+      : creditScope.filter((p) => p !== key);
+    patchCredit({ platforms: next });
+  };
+  const lastRunLabel = credit.last_run.at
+    ? formatRelative(credit.last_run.at)
+    : "尚未执行";
 
   return (
     <div className="sched">
@@ -110,6 +203,62 @@ export function SchedulerPage() {
             <div className="bv2">{nextLabel}</div>
           </div>
         </div>
+      </div>
+
+      {/* 定时积分查询：与签到任务并列、互不影响 */}
+      <div className="gtitle">定时积分查询</div>
+      <div className="sched-card">
+        <div className="sched-grid">
+          <div className="sched-ctl">
+            <Switch
+              checked={credit.settings.enabled}
+              onChange={(v) => patchCredit({ enabled: v })}
+              label="启用定时积分查询"
+            />
+            <div>
+              <div className="st-name">自动查询积分</div>
+              <div className="st-desc">按间隔直连官方接口刷新全部账号</div>
+            </div>
+          </div>
+          <span className="divider-v" />
+          <div>
+            <div className="bl">查询间隔</div>
+            <Select
+              value={String(credit.settings.interval_minutes)}
+              onChange={(v) => patchCredit({ interval_minutes: Number(v) })}
+              options={CREDIT_INTERVAL_OPTIONS}
+            />
+          </div>
+          <span className="divider-v" />
+          <div>
+            <div className="bl">平台范围</div>
+            <div className="sched-scope">
+              {CREDIT_SCOPE_KEYS.map((key) => (
+                <span className="scope-item" key={key}>
+                  <span className="scope-name">{platformLabel(key)}</span>
+                  <Switch
+                    checked={creditScope.includes(key)}
+                    onChange={(v) => toggleCreditPlatform(key, v)}
+                    label={platformLabel(key)}
+                  />
+                </span>
+              ))}
+            </div>
+          </div>
+          <span className="divider-v" />
+          <div>
+            <div className="bl">最近执行</div>
+            <div className="bv2">{lastRunLabel}</div>
+            <div className="st-desc">
+              {credit.last_run.at
+                ? credit.last_run.message
+                : "启用后按间隔自动查询"}
+            </div>
+          </div>
+        </div>
+        <p className="sched-hint">
+          定时查询强制刷新真实积分（不走页面 60 秒本地缓存），结果写回现有缓存；与定时签到互不影响，同一时刻只允许一个批量任务执行。
+        </p>
       </div>
 
       {/* 失败处理参数 */}

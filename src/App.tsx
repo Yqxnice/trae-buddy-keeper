@@ -185,7 +185,7 @@ export default function App() {
   useEffect(() => {
     const unlisten = listen("tray-checkin", async () => {
       try {
-        const results = await api.checkinAll();
+        const results = await api.checkinAll(undefined, "tray");
         const success = results.filter((r) => r.success).length;
         useUIStore.getState().bumpCheckin();
         useUIStore

@@ -16,6 +16,7 @@ const LV_LABEL: Record<string, { cls: string; text: string }> = {
   success: { cls: "lv-ok", text: "成功" },
   error: { cls: "lv-err", text: "失败" },
   info: { cls: "lv-info", text: "信息" },
+  warning: { cls: "lv-info", text: "警告" },
 };
 
 export function LogsPage() {

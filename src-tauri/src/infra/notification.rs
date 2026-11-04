@@ -107,19 +107,24 @@ pub fn register_windows_app_id(app_id: &str, display_name: &str) {
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let key = format!("HKCU\\Software\\Classes\\AppUserModelId\\{}", app_id);
-    let _ = std::process::Command::new("reg")
-        .args([
-            "add",
-            &key,
-            "/v",
-            "DisplayName",
-            "/t",
-            "REG_SZ",
-            "/d",
-            display_name,
-            "/f",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
+    let display_name = display_name.to_string();
+    // 注册表写入放到后台线程：reg.exe 拉起并等待退出会阻塞启动流程约百毫秒，
+    // 而该注册项只影响之后的系统通知，与主窗口显示无关
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("reg")
+            .args([
+                "add",
+                &key,
+                "/v",
+                "DisplayName",
+                "/t",
+                "REG_SZ",
+                "/d",
+                &display_name,
+                "/f",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+    });
 }
 

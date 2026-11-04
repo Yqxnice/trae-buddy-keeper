@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { RefreshCw, FolderSearch, FolderOpen, Download, RotateCcw, HardDriveDownload, HardDriveUpload } from "lucide-react";
+import { RefreshCw, FolderSearch, FolderOpen, Download, RotateCcw, HardDriveDownload, HardDriveUpload, Github } from "lucide-react";
 import { PageHeader } from "@/components/PageHeader/PageHeader";
 import { Button } from "@/components/Button/Button";
 import { Switch } from "@/components/Switch/Switch";
@@ -152,6 +152,15 @@ export function SettingsPage() {
   const openDataFolder = async () => {
     try {
       await api.openDataDir();
+    } catch (e: any) {
+      pushToast("打开失败", e?.toString(), "error");
+    }
+  };
+
+  // 在系统默认浏览器中打开项目仓库（由后端 open crate 调起，避免前端新开窗口）
+  const openRepo = async () => {
+    try {
+      await api.openProjectRepo();
     } catch (e: any) {
       pushToast("打开失败", e?.toString(), "error");
     }
@@ -465,6 +474,16 @@ export function SettingsPage() {
           <Button onClick={openDataFolder}>
             <FolderOpen />
             打开文件夹
+          </Button>
+        </div>
+        <div className="set-row">
+          <div className="set-info">
+            <div className="set-name">项目仓库</div>
+            <div className="set-desc data-dir">https://github.com/Yqxnice/trae-buddy-keeper</div>
+          </div>
+          <Button onClick={openRepo}>
+            <Github />
+            打开仓库
           </Button>
         </div>
         <div className="set-row">

@@ -108,6 +108,12 @@
   color: var(--muted);
   white-space: nowrap;
 }
+/* Trae 档案未通过切换验证：列表行内警示，引导重建档 */
+.accs-vault-bad {
+  color: var(--warn);
+  font-weight: 500;
+}
+
 .accs-note {
   flex: 1;
   min-width: 0;

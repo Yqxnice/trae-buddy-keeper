@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   Play,
   RefreshCw,
+  RotateCcw,
   Globe,
 } from "lucide-react";
 import { PageHeader } from "@/components/PageHeader/PageHeader";
@@ -13,11 +14,12 @@ import { LedgerRow, RowAction } from "@/components/LedgerRow/LedgerRow";
 import { RowMenu, type MenuItem } from "@/components/RowMenu/RowMenu";
 import { Dialog } from "@/components/Dialog/Dialog";
 import { TextInput, TextArea } from "@/components/TextInput/TextInput";
-import { api, type AccountInfo, type WbVariant } from "@/lib/api";
+import { api, type AccountInfo, type TraeVaultInfo, type WbVariant } from "@/lib/api";
 import traeLogo from "@/assets/logos/trae-color.svg";
 import workbuddyLogo from "@/assets/logos/workbuddy-color.svg";
 import codebuddyLogo from "@/assets/logos/codebuddy-color.svg";
-import { confirmDialog } from "@/components/ConfirmDialog/ConfirmDialog";
+import qoderLogo from "@/assets/logos/qoder-color.svg";
+import { confirmDialog, confirmDialogChecked } from "@/components/ConfirmDialog/ConfirmDialog";
 import { formatDate, formatRelative, platformLabel, checkinChipInfo, checkinDayStart } from "@/lib/utils";
 import { useUIStore } from "@/stores/ui";
 import "./Accounts.css";
@@ -27,9 +29,10 @@ const CLIENT_APPS: Record<string, { src: string; label: string; short: string }>
   trae: { src: traeLogo, label: "Trae 客户端", short: "Trae" },
   workbuddy: { src: workbuddyLogo, label: "WorkBuddy 客户端", short: "WorkBuddy" },
   codebuddy_cn: { src: codebuddyLogo, label: "CodeBuddy CN 客户端", short: "CodeBuddy CN" },
+  qoder_cn: { src: qoderLogo, label: "Qoder CN 客户端", short: "Qoder CN" },
 };
 
-// 操作门控：与后端防线一一对应（签到幂等跳过 / 续期 24h 阈值），按钮态如实反映可操作性
+// 操作门控：签到幂等跳过由前后端共同守住；手动续期不设到期窗口，仅后端保留 5 分钟限频
 function checkinBlocked(acc: AccountInfo): "cooling" | "signed" | "expired" | null {
   if (acc.cooldown_until > Date.now() / 1000) return "cooling";
   if (acc.checkin_status === "success" && acc.last_checkin_time >= checkinDayStart()) return "signed";
@@ -40,13 +43,6 @@ function checkinBlocked(acc: AccountInfo): "cooling" | "signed" | "expired" | nu
 function tokenExpired(acc: AccountInfo): boolean {
   return acc.token_expires_at > 0 && acc.token_expires_at < Date.now() / 1000;
 }
-// 与后端 renew_token 阈值一致：剩余 >24h 或无有效期信息（=0）时必被拒（「无需续期」）；
-// 已过期反而可续（refresh_token 换新 access_token 正是续期的目标场景）
-function renewLocked(acc: AccountInfo): boolean {
-  if (acc.token_expires_at <= 0) return true;
-  return acc.token_expires_at - Date.now() / 1000 > 86400;
-}
-
 export function AccountsPage() {
   const platform = useUIStore((s) => s.platform);
   const pushToast = useUIStore((s) => s.pushToast);
@@ -57,6 +53,7 @@ export function AccountsPage() {
   const [addOpen, setAddOpen] = useState(false);
   const [batchRunning, setBatchRunning] = useState(false);
   const [renewRunning, setRenewRunning] = useState(false);
+  const [restoring, setRestoring] = useState(false);
 
   const [checkingId, setCheckingId] = useState<string | null>(null);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
@@ -64,6 +61,8 @@ export function AccountsPage() {
   const [archivingId, setArchivingId] = useState<string | null>(null);
   const [creditLoadingId, setCreditLoadingId] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  // Trae 档案验证状态：切换未确认登录时后端打标，列表显示「档案待验证」徽标
+  const [vaultFlags, setVaultFlags] = useState<Record<string, TraeVaultInfo | null>>({});
 
   // 编辑弹窗
   const [editOpen, setEditOpen] = useState(false);
@@ -87,14 +86,44 @@ export function AccountsPage() {
   const [wbLoginState, setWbLoginState] = useState("");
   const [wbVariant, setWbVariant] = useState<WbVariant>("cn");
 
+  // Qoder CN 设备流登录状态；compat 为授权页兼容模式
+  const [qoderWaiting, setQoderWaiting] = useState(false);
+  const [qoderLoginState, setQoderLoginState] = useState("");
+  const [qoderCompat, setQoderCompat] = useState(false);
+
   // 全屏 loading 仅首次挂载生效；后续刷新原地更新列表，避免整页拆建抖动
   // notify=true（手动刷新）时成功/失败均 toast；操作后的自动重载保持静默
+  const refreshVaultFlags = useCallback(
+    async (list: AccountInfo[]) => {
+      if (platform !== "trae" && platform !== "qoder_cn") return;
+      const isQoder = platform === "qoder_cn";
+      const entries = await Promise.all(
+        list
+          .filter((a) => a.platform === platform)
+          .map(async (a) =>
+            [
+              a.id,
+              await (isQoder
+                ? api.qoderVaultInfo(a.id)
+                : api.traeVaultInfo(a.id)
+              ).catch(() => null),
+            ] as const
+          )
+      );
+      const next: Record<string, TraeVaultInfo | null> = {};
+      for (const [id, info] of entries) next[id] = info;
+      setVaultFlags(next);
+    },
+    [platform]
+  );
+
   const load = useCallback(
     async (notify = false) => {
       if (notify) setRefreshing(true);
       try {
         const list = await api.listAccounts();
         setAccounts(list);
+        void refreshVaultFlags(list);
         setNowSec(Date.now() / 1000);
         if (notify) pushToast("刷新成功", "账号列表已更新", "success");
         // 后台刷新过期的真实积分（60s 内查过则跳过），完成后静默更新列表
@@ -116,7 +145,7 @@ export function AccountsPage() {
         if (notify) setRefreshing(false);
       }
     },
-    [platform, pushToast]
+    [platform, pushToast, refreshVaultFlags]
   );
 
   useEffect(() => {
@@ -130,6 +159,9 @@ export function AccountsPage() {
     if (oauthWaiting) handleCancelOauth();
     setWbWaiting(false);
     setWbLoginState("");
+    if (qoderWaiting && qoderLoginState) void api.stopQoderLogin(qoderLoginState);
+    setQoderWaiting(false);
+    setQoderLoginState("");
     setAddOpen(true);
   };
 
@@ -188,6 +220,9 @@ export function AccountsPage() {
     }
     setWbWaiting(false);
     setWbLoginState("");
+    if (qoderWaiting && qoderLoginState) void api.stopQoderLogin(qoderLoginState);
+    setQoderWaiting(false);
+    setQoderLoginState("");
     setAddOpen(false);
   };
 
@@ -229,6 +264,39 @@ export function AccountsPage() {
     }, 2000);
     return () => clearInterval(timer);
   }, [wbWaiting, wbLoginState, wbVariant, load, pushToast]);
+
+  const handleQoderLogin = async () => {
+    try {
+      const r = await api.startQoderLogin(qoderCompat);
+      setQoderLoginState(r.state);
+      setQoderWaiting(true);
+      pushToast("提示", "已在浏览器打开 Qoder CN 登录页，完成后将自动添加", "info");
+    } catch (e: any) {
+      pushToast("启动登录失败", e?.toString(), "error");
+    }
+  };
+
+  // Qoder CN 设备流轮询：每 2 秒查询一次授权结果，成功即入库并关闭弹窗
+  useEffect(() => {
+    if (!qoderWaiting || !qoderLoginState) return;
+    const timer = setInterval(async () => {
+      try {
+        const r = await api.pollQoderLogin(qoderLoginState);
+        if (r.status === "ready") {
+          setQoderWaiting(false);
+          setQoderLoginState("");
+          pushToast("登录成功", `已添加账户 ${r.name}`, "success");
+          setAddOpen(false);
+          load();
+        }
+      } catch (e: any) {
+        setQoderWaiting(false);
+        setQoderLoginState("");
+        pushToast("登录失败", e?.toString(), "error");
+      }
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [qoderWaiting, qoderLoginState, load, pushToast]);
 
   /** 账号是否为 WorkBuddy 国际版（domain 后缀判定，与后端 variant_of 同口径） */
   const isAiAccount = (acc: AccountInfo) =>
@@ -298,18 +366,19 @@ export function AccountsPage() {
   };
 
   const handleDelete = async (id: string) => {
-    if (
-      !(await confirmDialog({
-        title: "删除账户",
-        message: "确定删除该账户？相关签到记录也会被清除。",
-        confirmText: "删除",
-        danger: true,
-      }))
-    )
-      return;
+    const [ok, keepBackup] = await confirmDialogChecked({
+      title: "删除账户",
+      message:
+        "确定删除该账户？相关签到记录、积分记录会被清除。\n该账户保存的客户端登录档案也会一并清理（Trae / Qoder CN）。",
+      checkLabel: "保留登录档案备份（重命名为 .bak，可手动恢复）",
+      checkDefault: true,
+      confirmText: "删除",
+      danger: true,
+    });
+    if (!ok) return;
     try {
-      await api.deleteAccount(id);
-      pushToast("成功", "账户已删除", "success");
+      const msg = await api.deleteAccount(id, keepBackup);
+      pushToast("账户已删除", msg, "success");
       load();
     } catch (e: any) {
       pushToast("删除失败", e?.toString(), "error");
@@ -317,19 +386,42 @@ export function AccountsPage() {
   };
 
   const handleSwitch = async (id: string) => {
-    // WorkBuddy/Trae：真实切换客户端登录账号（会关闭并重启客户端，耗时较长）
-    if (platform === "workbuddy" || platform === "trae") {
+    // 真实切换客户端登录账号（会关闭并重启客户端，耗时较长）
+    if (platform === "workbuddy" || platform === "trae" || platform === "qoder_cn") {
       setSwitchingId(id);
       try {
-        // Trae：运行中切库会写花客户端数据，先检测并明确告知会自动关闭客户端
+        // 运行中切库会写花客户端数据，先检测并明确告知会自动关闭客户端
         if (platform === "trae" && (await api.traeClientRunning())) {
           pushToast("正在关闭客户端", "检测到 Trae CN 正在运行，切换前会先关闭它", "info");
+        }
+        if (platform === "qoder_cn" && (await api.qoderClientRunning())) {
+          pushToast("正在关闭客户端", "检测到 Qoder CN 正在运行，切换前会先关闭它", "info");
         }
         const msg =
           platform === "workbuddy"
             ? await api.switchWorkbuddyClient(id)
-            : await api.switchTraeClient(id);
+            : platform === "qoder_cn"
+              ? await api.switchQoderClient(id)
+              : await api.switchTraeClient(id);
+        // 后端「不确认 ≠ 失败」：保留客户端现状并打标，这里提供一键重建档引导
+        if (
+          (platform === "trae" || platform === "qoder_cn") &&
+          msg.startsWith("SWITCH_WARN:")
+        ) {
+          const body = msg.slice("SWITCH_WARN:".length);
+          const client = platformLabel(platform);
+          pushToast("切换结果待确认", body, "warning");
+          const ok = await confirmDialog({
+            title: "现在重新建档？",
+            message: `本次切换未能确认客户端已登录到目标账号。\n\n${body}\n\n客户端未回滚，你可以先在 ${client} 里登录该账号，再点「重新建档」把新的登录态保存进档案（建档会先关闭客户端）。若想回到切换前，可点「恢复切换前现场」。`,
+            confirmText: "重新建档",
+          });
+          if (ok) await handleArchive(id, true);
+          void load();
+          return;
+        }
         pushToast("切换成功", msg, "success");
+        void load();
       } catch (e: any) {
         pushToast("切换失败", e?.toString(), "error");
       } finally {
@@ -358,12 +450,38 @@ export function AccountsPage() {
     }
   };
 
-  // Trae：把当前客户端登录态快照到该账号（建档），切换的前提
+  // Qoder CN：把上一次切换前的现场写回客户端（人工兜底回退）
+  const handleRestoreLast = async () => {
+    const ok = await confirmDialog({
+      title: "恢复切换前现场",
+      message:
+        "这会关闭 Qoder CN 客户端，把上一次切换前的登录现场写回并重启。\n\n仅在上次切换结果不对时使用；当前客户端里的登录账号会被覆盖。",
+      confirmText: "恢复并重启",
+    });
+    if (!ok) return;
+    setRestoring(true);
+    try {
+      const msg = await api.restoreQoderLast();
+      pushToast("恢复成功", msg, "success");
+      void load();
+    } catch (e: any) {
+      pushToast("恢复失败", e?.toString(), "error");
+    } finally {
+      setRestoring(false);
+    }
+  };
+
+  // Trae / Qoder CN：把当前客户端登录态快照到该账号（建档），切换的前提
   const handleArchive = async (id: string, closeRunning = false) => {
     setArchivingId(id);
     try {
-      const msg = await api.backupTraeVault(id, closeRunning);
+      const msg =
+        platform === "qoder_cn"
+          ? await api.backupQoderVault(id, closeRunning)
+          : await api.backupTraeVault(id, closeRunning);
       pushToast("建档成功", msg, "success");
+      // 重新建档会清掉「待验证」标记，刷新徽标状态
+      void load();
     } catch (e: any) {
       const msg = String(e ?? "");
       // 客户端仍在后台运行：征得用户确认后自动关闭（温和→强杀）再建档
@@ -371,7 +489,7 @@ export function AccountsPage() {
         const ok = await confirmDialog({
           title: "客户端仍在运行",
           message:
-            "检测到 Trae 客户端仍在后台运行（点窗口 × 可能只是驻留后台，并未退出进程）。\n\n注意：关闭会退出全部 Trae 窗口——如果你正在用 Trae 改代码，未保存的内容会丢失，建议先保存或改完再建档。\n\n是否关闭客户端并继续建档？",
+            `检测到 ${platformLabel(platform)} 客户端仍在后台运行（点窗口 × 可能只是驻留后台，并未退出进程）。\n\n注意：关闭会退出全部 ${platformLabel(platform)} 窗口——如果你正在改代码，未保存的内容可能丢失，建议先保存或改完再建档。\n\n是否关闭客户端并继续建档？`,
           confirmText: "关闭并建档",
         });
         setArchivingId(null);
@@ -413,15 +531,19 @@ export function AccountsPage() {
     }
   };
 
-  // 一键续期：对即将到期的凭证自动续期
+  // 一键续期：手动批量刷新全部账号，不受自动巡检的 24h 窗口限制
   const handleRenewAll = async () => {
     setRenewRunning(true);
     try {
       const msgs = await api.autoRenewAll();
-      const fails = msgs.filter((m) => m.includes("失败"));
+      const fails = msgs.filter((m) => m.includes("续期失败"));
       pushToast(
         "一键续期完成",
-        fails.length > 0 ? `${msgs.length - fails.length} 个成功，${fails.length} 个失败` : "全部成功或无需续期",
+        fails.length > 0
+          ? `${msgs.length - fails.length} 个成功，${fails.length} 个失败`
+          : msgs.length > 0
+            ? `已续期 ${msgs.length} 个账号`
+            : "当前没有账号",
         fails.length > 0 ? "info" : "success"
       );
       setAccounts(await api.listAccounts());
@@ -462,7 +584,7 @@ export function AccountsPage() {
       !tokenExpired(a) &&
       !(platform === "workbuddy" && isAiAccount(a))
   ).length;
-  const renewEligible = filtered.some((a) => !renewLocked(a));
+  const renewEligible = filtered.length > 0;
 
   return (
     <div className="accs">
@@ -477,6 +599,16 @@ export function AccountsPage() {
           <Globe /> 网页授权
         </Button>
         <span className="spacer" />
+        {platform === "qoder_cn" && (
+          <Button
+            variant="ghost"
+            disabled={restoring}
+            title="把上一次切换前的客户端登录现场写回并重启"
+            onClick={handleRestoreLast}
+          >
+            <RotateCcw /> {restoring ? "恢复中…" : "恢复切换前现场"}
+          </Button>
+        )}
         <Button
           variant="ghost"
           disabled={batchRunning || checkableCount === 0}
@@ -488,7 +620,7 @@ export function AccountsPage() {
         <Button
           variant="ghost"
           disabled={renewRunning || !renewEligible}
-          title={!renewEligible ? "所有账号 Token 均在 24h 窗口外，暂无需续期" : undefined}
+          title={!renewEligible ? "当前没有账号" : "手动批量续期全部账号（不受 24h 窗口限制，单个账号 5 分钟内不可重复）"}
           onClick={handleRenewAll}
         >
           <RefreshCw className={renewRunning ? "spin" : ""} /> {renewRunning ? "续期中…" : "一键续期"}
@@ -532,15 +664,21 @@ export function AccountsPage() {
             const apps =
               platform === "trae"
                 ? ["trae"]
-                : ["workbuddy", "codebuddy_cn"];
-            const isBusy = (client: string) =>
-              client === "codebuddy_cn"
-                ? switchingCnId === acc.id
-                : switchingId === acc.id;
-            // 行内按钮门控：今日已签/冷却中不可再签；Token 窗口外不可续期
+                : platform === "qoder_cn"
+                  ? ["qoder_cn"]
+                  : ["workbuddy", "codebuddy_cn"];
+            // 切换/建档都要关掉客户端再覆盖数据目录，同一时间只允许一个进行：
+            // 并发点击会让两个任务互相抢客户端，最后写「当前已注入」标记的那个
+            // 未必是客户端里实际登录的账号。
+            const clientOpRunning =
+              switchingId !== null || switchingCnId !== null || archivingId !== null;
+            // 行内按钮门控：今日已签/冷却中不可再签；手动续期不设到期窗口
             const blocked = checkinBlocked(acc);
+            // 后端守护未确认登录时打标；列表里直接提示档案可能需要重建
+            const vaultBad =
+              (platform === "trae" || platform === "qoder_cn") &&
+              Boolean(vaultFlags[acc.id]?.verify_failed_at);
             const isAi = platform === "workbuddy" && isAiAccount(acc);
-            const renewIsLocked = renewLocked(acc);
             const menu: MenuItem[] = [
               { label: "编辑", onClick: () => openEdit(acc.id) },
               { sep: true },
@@ -572,7 +710,7 @@ export function AccountsPage() {
                               ? `当前登录在${app.label} · 点击切换到此客户端`
                               : `切换${app.label}（将重启客户端）`
                           }
-                          disabled={isBusy(key)}
+                          disabled={clientOpRunning}
                           onClick={() => handleAppSwitch(key, acc.id)}
                         >
                           <img src={app.src} alt="" />
@@ -609,22 +747,19 @@ export function AccountsPage() {
                     <RowAction
                       label="续期"
                       title={
-                        renewIsLocked
-                          ? acc.token_expires_at <= 0
-                            ? "无有效期信息，无法自动续期"
-                            : `Token 剩余 ${Math.ceil((acc.token_expires_at - nowSec) / 86400)} 天，到期前 24h 内才可续期`
-                          : acc.token_expires_at < nowSec
-                            ? "凭证已过期，立即续期"
-                            : "手动续期"
+                        acc.token_expires_at > 0 && acc.token_expires_at < nowSec
+                          ? "凭证已过期，立即续期"
+                          : acc.token_expires_at > 0
+                            ? `手动续期（剩余 ${Math.ceil((acc.token_expires_at - nowSec) / 86400)} 天，不受 24h 窗口限制；5 分钟内不可重复）`
+                            : "手动续期（无有效期信息也可尝试；5 分钟内不可重复）"
                       }
-                      disabled={renewIsLocked}
                       onClick={() => handleRenew(acc.id)}
                     />
-                    {platform === "trae" && (
+                    {(platform === "trae" || platform === "qoder_cn") && (
                       <RowAction
                         label="存档"
-                        title="把当前 Trae 客户端登录态存档到此账户（需先关闭客户端）"
-                        disabled={archivingId === acc.id}
+                        title={`把当前 ${platformLabel(platform)} 客户端登录态存档到此账户（需先关闭客户端）`}
+                        disabled={clientOpRunning}
                         onClick={() => handleArchive(acc.id)}
                       />
                     )}
@@ -638,6 +773,14 @@ export function AccountsPage() {
                     {acc.token_expires_at ? formatDate(acc.token_expires_at) : "—"}
                     {acc.cooldown_until > nowSec &&
                       ` · 冷却至 ${formatDate(acc.cooldown_until)}`}
+                    {vaultBad && (
+                      <span
+                        className="accs-vault-bad"
+                        title="上次切换未能确认客户端登录到该账号，建议重新登录并重新建档"
+                      >
+                        {" · 档案待验证"}
+                      </span>
+                    )}
                   </span>
                   {acc.credits_balance != null ? (
                     <span className="accs-credit" title={`积分包明细：\n${creditTitle}`}>
@@ -765,6 +908,54 @@ export function AccountsPage() {
                   />
                 </div>
                 <Button variant="pri" className="w-full" onClick={handleTraeOauth}>
+                  <Globe /> 打开浏览器授权登录
+                </Button>
+              </>
+            )
+          ) : platform === "qoder_cn" ? (
+            qoderWaiting ? (
+              <>
+                <div className="accs-waiting">
+                  <RefreshCw className="spin" size={14} />
+                  正在轮询 Qoder CN 授权结果，登录成功后自动添加账户…
+                </div>
+                <Button
+                  className="w-full"
+                  onClick={() => {
+                    void api.stopQoderLogin(qoderLoginState);
+                    setQoderWaiting(false);
+                    setQoderLoginState("");
+                  }}
+                >
+                  取消
+                </Button>
+              </>
+            ) : (
+              <>
+                <p className="hint">
+                  点击下方按钮在浏览器中打开 Qoder CN 登录页，完成登录后自动添加账户。
+                  若授权页提示「参数无效」，可切换到兼容模式后重试。
+                </p>
+                <div className="fld">
+                  <label>授权模式</label>
+                  <div className="wb-variant-row">
+                    <Button
+                      variant={!qoderCompat ? "pri" : "default"}
+                      className="flex1"
+                      onClick={() => setQoderCompat(false)}
+                    >
+                      标准
+                    </Button>
+                    <Button
+                      variant={qoderCompat ? "pri" : "default"}
+                      className="flex1"
+                      onClick={() => setQoderCompat(true)}
+                    >
+                      兼容
+                    </Button>
+                  </div>
+                </div>
+                <Button variant="pri" className="w-full" onClick={handleQoderLogin}>
                   <Globe /> 打开浏览器授权登录
                 </Button>
               </>

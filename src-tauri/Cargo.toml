@@ -1,6 +1,6 @@
 [package]
 name = "trae-buddy-keeper"
-version = "0.1.5"
+version = "1.0.0"
 description = "TraeBuddy Keeper - TRAE & WorkBuddy 签到管理"
 authors = ["you"]
 edition = "2021"

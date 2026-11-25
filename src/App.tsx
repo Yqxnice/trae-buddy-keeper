@@ -48,7 +48,7 @@ type Tab =
   | "logs"
   | "settings";
 
-const PLATFORMS = ["trae", "workbuddy"] as const;
+const PLATFORMS = ["trae", "workbuddy", "qoder_cn"] as const;
 
 // 浏览器预览环境没有 Tauri internals，兜底空实现避免白屏（Tauri 内运行不受影响）
 const appWindow = (() => {

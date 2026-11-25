@@ -34,7 +34,7 @@ const OAUTH_CLIENT_SECRET: &str = "-";
 const OAUTH_REDIRECT_URI: &str = "http://127.0.0.1:18923/authorize";
 const OAUTH_CALLBACK_PORT: u16 = 18923;
 
-// 与真实 TRAE SOLO 客户端一致的常量（参考实现向量钉住）
+// 与 TRAE SOLO 客户端一致的常量
 const IDE_VERSION: &str = "0.1.61";
 const DEVICE_BRAND: &str = "83DG";
 const OS_VERSION: &str = "Windows 11 Pro";
@@ -583,7 +583,7 @@ fn parse_exchange_response(body: &str) -> Result<(String, String), String> {
             if token.is_empty() && refresh.is_empty() {
                 return Err("换证响应里没有令牌".to_string());
             }
-            // 只有 refreshToken 回来时用它当 accessToken（参考实现同样兜底）
+            // 只有 refreshToken 回来时用它当 accessToken
             let access = if token.is_empty() {
                 refresh.clone()
             } else {

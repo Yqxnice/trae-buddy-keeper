@@ -76,7 +76,9 @@ export function CreditsPage() {
         sub={
           platform === "workbuddy"
             ? "各账号实时余额与积分包到期明细（数据来自腾讯 billing 接口）"
-            : "各账号实时余额与积分包到期明细（数据来自 TRAE 权益接口）"
+            : platform === "qoder_cn"
+              ? "各账号实时余额与积分包到期明细（数据来自 Qoder 官方额度接口）"
+              : "各账号实时余额与积分包到期明细（数据来自 TRAE 权益接口）"
         }
         right={
           <Button onClick={handleRefresh} disabled={refreshing}>

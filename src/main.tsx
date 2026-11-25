@@ -23,6 +23,8 @@ window.addEventListener(
   },
   { passive: false }
 );
+// 屏蔽 WebView 的浏览器原生右键菜单（重新加载 / 检查元素等），保持桌面应用观感
+window.addEventListener("contextmenu", (e) => e.preventDefault());
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

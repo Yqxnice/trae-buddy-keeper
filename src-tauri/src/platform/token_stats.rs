@@ -1,6 +1,6 @@
 //! 本地 WorkBuddy / WorkBuddy 国际版 / CodeBuddy IDE Token 统计。
 //!
-//! 实现参考了开源项目 workbuddy-switch。
+//! 扫描本地会话日志聚合 Token 用量，并合并云端用量源。
 //!
 //! 日志只在这里解码、去重和按时间聚合，Tauri 层只负责转发结果。响应只包含聚合数字
 //! 和脱敏标识，不返回消息正文、arguments 或认证信息。
@@ -160,6 +160,37 @@ fn usage_object(value: Option<&Value>) -> Option<&Map<String, Value>> {
     value?
         .as_object()
         .filter(|object| field(object, &["input_tokens", "inputTokens", "prompt_tokens"]).is_some())
+}
+
+/// 客户端事件日志形如 `{ts: RFC3339, type, data}`，把时间归一为毫秒、把嵌套
+/// 用量对象提升到顶层，后续沿用统一的用量与日期解码。
+fn normalize_record(mut value: Value) -> Value {
+    if value.get("timestamp").is_none() {
+        if let Some(ms) = value
+            .get("ts")
+            .and_then(Value::as_str)
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.timestamp_millis())
+        {
+            value["timestamp"] = json!(ms);
+        }
+    }
+    if value.get("usage").is_none() {
+        if let Some(data) = value.get("data") {
+            for key in ["usage", "tokenUsage", "usageMetadata"] {
+                if let Some(u) = data.get(key) {
+                    value["usage"] = u.clone();
+                    break;
+                }
+            }
+        }
+    }
+    if value.get("model").is_none() {
+        if let Some(m) = value.get("data").and_then(|d| d.get("model")) {
+            value["model"] = m.clone();
+        }
+    }
+    value
 }
 
 /// 解码一条记录。Usage 优先级：message.usage > providerData.usage > 顶层 usage。
@@ -483,10 +514,11 @@ fn source_from_roots(roots: &[PathBuf], name: &str, cutoff: Option<i64>) -> Valu
                 collector.note_parse_error();
                 continue;
             };
-            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            let Ok(mut value) = serde_json::from_str::<Value>(&line) else {
                 collector.note_parse_error();
                 continue;
             };
+            value = normalize_record(value);
             if let Some(title) = non_empty_text(value.get("aiTitle")) {
                 ai_title = Some(title);
             }
@@ -563,6 +595,15 @@ fn workbuddy_ai_roots() -> Vec<PathBuf> {
         roots.push(sessions);
     }
     roots
+}
+
+/// Qoder CN 会话日志根（CLI 会话分段文件）。
+fn qoder_cn_roots() -> Vec<PathBuf> {
+    [".qoder-cn", ".qoder"]
+        .iter()
+        .map(|name| home().join(name).join("logs").join("sessions"))
+        .filter(|root| root.is_dir())
+        .collect()
 }
 
 fn codebuddy_extension_data_dir() -> PathBuf {
@@ -926,6 +967,7 @@ pub fn get_statistics(days: Option<i64>) -> Value {
         "sources": [
             source_from_roots(&workbuddy_cn_roots(), "workbuddy", cutoff),
             source_from_roots(&workbuddy_ai_roots(), "workbuddy-ai", cutoff),
+            source_from_roots(&qoder_cn_roots(), "qoder-cn", cutoff),
             ide_source(
                 codebuddy_extension_data_dir(),
                 "codebuddy-ide",

@@ -5359,7 +5359,7 @@ dependencies = [
 
 [[package]]
 name = "trae-buddy-keeper"
-version = "0.1.5"
+version = "1.0.0"
 dependencies = [
  "aes-gcm",
  "anyhow",

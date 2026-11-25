@@ -59,7 +59,7 @@ pub(crate) fn authed(
         .header("User-Agent", "Mozilla/5.0")
         .header("Origin", TRAE_ORIGIN)
         .header("Referer", format!("{}/", TRAE_ORIGIN))
-        // 网页端业务接口固定区域头，与参考实现一致
+        // 网页端业务接口固定区域头
         .header("X-User-Region", "cn");
     if !device_id.is_empty() {
         req = req.header("x-device-id", device_id);
@@ -116,7 +116,9 @@ fn scan_credit_number(v: &Value, depth: usize) -> Option<i64> {
     if depth > 5 {
         return None;
     }
-    const SKIPS: [&str; 8] = ["code", "message", "expire", "time", "date", "limit", "status", "id"];
+    const SKIPS: [&str; 8] = [
+        "code", "message", "expire", "time", "date", "limit", "status", "id",
+    ];
     const HINTS: [&str; 6] = ["credit", "point", "reward", "grant", "bonus", "amount"];
     match v {
         Value::Object(m) => {
@@ -298,7 +300,11 @@ async fn fetch_expired_ents(
                 .get("expire_time_ms")
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0) as i64;
-            let at = if ms > 1_000_000_000_000 { ms / 1000 } else { ms };
+            let at = if ms > 1_000_000_000_000 {
+                ms / 1000
+            } else {
+                ms
+            };
             if at > 0 && (!name.is_empty() || limit > 0.0) {
                 out.push((at, limit, name));
             }
@@ -342,10 +348,7 @@ pub async fn fetch_credits(
     // 临期包名称映射（到期秒 → 包名）；查询失败只影响名称展示，不阻断余额主流程
     let names: std::collections::HashMap<i64, String> =
         match fetch_expired_ents(&client, acc.access_token.trim()).await {
-            Ok(list) => list
-                .into_iter()
-                .map(|(at, _, name)| (at, name))
-                .collect(),
+            Ok(list) => list.into_iter().map(|(at, _, name)| (at, name)).collect(),
             Err(_) => Default::default(),
         };
     let mut total = 0.0_f64;
@@ -505,7 +508,7 @@ fn device_proof(secret_hex: &str, path: &str, client_id: &str, refresh: &str) ->
     }))
 }
 
-/// 换证「ClientID × 产品线」组合链（对齐参考实现）：
+/// 换证「ClientID × 产品线」组合链：
 /// ① 桌面端 IDE 线 ② SOLO ClientID + IDE_PC ③ SOLO ClientID + SOLO_PC。
 /// 10101（refresh token 不属于该客户端）/ 20403（设备不匹配）时换下一组再试。
 const EXCHANGE_COMBOS: [(&str, &str, &str); 3] = [
@@ -618,5 +621,117 @@ pub async fn refresh_access_token(acc: &Account) -> Result<(String, String, i64,
                 .map_err(|legacy_err| anyhow!("{}；{}", bound_err, legacy_err))?;
             Ok((a, r, e, false))
         }
+    }
+}
+
+// ===== 切换前的服务端会话预检（fail-open） =====
+
+/// 三态而非布尔：只有「明确被吊销」才预警，其余一律放行。
+/// 这里不硬阻断：签到 401 的账号预检必判死，
+/// 而「切进该账号重新登录」恰恰是唯一恢复手段。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionProbe {
+    Alive,
+    Revoked(String),
+    Indeterminate(String),
+}
+
+impl SessionProbe {
+    /// 只有 Revoked 产生面向用户的警示文本；其余不打扰用户
+    pub fn warning(&self) -> Option<String> {
+        match self {
+            SessionProbe::Revoked(reason) => Some(format!(
+                "切换前预检：应用数据库里保存的 access_token 已被服务端判定失效（{reason}）。\
+                 客户端登录态与数据库里的 access_token 是两套凭证，切换仍会照常进行；\
+                 若客户端没能进入目标账号，请在该账号下重新登录并重新建档",
+                reason = truncate_reason(reason)
+            )),
+            _ => None,
+        }
+    }
+}
+
+fn truncate_reason(s: &str) -> String {
+    let mut out: String = s.chars().take(120).collect();
+    if s.chars().count() > 120 {
+        out.push('…');
+    }
+    out
+}
+
+/// 把签到状态接口的错误归类为「会话吊销」或「判不了」。
+/// 抽成纯函数便于单测：401 / 业务码 1001 才是明确吊销，网络故障、5xx、限流一律放行。
+pub fn classify_probe_error(err: &str) -> SessionProbe {
+    if err.contains("401") || err.contains("code=1001") {
+        SessionProbe::Revoked(err.to_string())
+    } else {
+        SessionProbe::Indeterminate(err.to_string())
+    }
+}
+
+/// 用数据库里的 access_token 打一次官方签到状态接口（5 秒超时）。
+/// 只用于预警，任何异常都吞成 Indeterminate，绝不阻断切换。
+pub async fn probe_session(acc: &Account) -> SessionProbe {
+    let token = acc.access_token.trim();
+    if token.is_empty() {
+        return SessionProbe::Indeterminate("无 access_token".to_string());
+    }
+    let client = match Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return SessionProbe::Indeterminate(e.to_string()),
+    };
+    match checkin_status(&client, token, &acc.device_id).await {
+        Ok(_) => SessionProbe::Alive,
+        Err(e) => classify_probe_error(&e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_revocation_is_warned() {
+        assert!(matches!(
+            classify_probe_error("TRAE status 请求失败: 401 Unauthorized"),
+            SessionProbe::Revoked(_)
+        ));
+        assert!(matches!(
+            classify_probe_error("code=1001 msg=未认证"),
+            SessionProbe::Revoked(_)
+        ));
+        assert!(SessionProbe::Revoked("401".into()).warning().is_some());
+    }
+
+    #[test]
+    fn network_and_server_errors_fail_open() {
+        for e in [
+            "error sending request",
+            "TRAE status 请求失败: 500 Internal Server Error",
+            "code=9074 msg=当前参与用户太多",
+            "请求超时",
+        ] {
+            assert!(matches!(
+                classify_probe_error(e),
+                SessionProbe::Indeterminate(_)
+            ));
+        }
+        assert!(SessionProbe::Alive.warning().is_none());
+        assert!(SessionProbe::Indeterminate("x".into()).warning().is_none());
+    }
+
+    #[test]
+    fn reason_is_truncated() {
+        let long = "401 ".repeat(100);
+        let p = SessionProbe::Revoked(long);
+        let w = p.warning().unwrap();
+        assert!(
+            w.len() < 400,
+            "警示文本不能把整个响应体塞给用户: {}",
+            w.len()
+        );
     }
 }

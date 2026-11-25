@@ -1,6 +1,6 @@
 //! WorkBuddy 真实积分查询：直连腾讯 billing「用户资源包」接口。
 //!
-//! 实现参考了开源项目 workbuddy-manager、workbuddy-switch。
+//! 真实积分查询：个人版资源包与企业配额分流。
 //!
 //! 口径：
 //! - 国内版路径固定 `/v2/billing/meter/get-user-resource`，ProductCode=p_tcaca，
@@ -20,7 +20,7 @@ use crate::data::models::{Account, CreditExpiry, CreditResult};
 use crate::platform::workbuddy::api::cookie_header;
 use crate::platform::workbuddy::variant::{variant_of, WbVariant};
 
-/// 企业配额接口（参考实现同口径）：企业账号不走个人版资源接口
+/// 企业配额接口：企业账号不走个人版资源接口
 const ENTERPRISE_USAGE_PATH: &str = "/v2/billing/meter/get-enterprise-user-usage";
 /// 企业 ID 补拉接口：type 兜底判定为企业版但账号缺 ID 时使用（单次尝试）
 const ENTERPRISE_ACCOUNTS_PATH: &str = "/console/accounts";
@@ -181,7 +181,7 @@ fn package_expiry(item: &Value) -> Option<i64> {
     Some(naive.and_utc().timestamp() - 8 * 3600)
 }
 
-/// 企业账号判定（对齐参考项目 issue #167）：有 enterpriseId，或 type ∈ {ultimate, exclusive}
+/// 企业账号判定：有 enterpriseId，或 type ∈ {ultimate, exclusive}
 fn is_enterprise(acc: &Account) -> bool {
     !acc.enterprise_id.trim().is_empty()
         || matches!(acc.account_type.trim(), "ultimate" | "exclusive")
@@ -202,7 +202,7 @@ fn first_number(v: &Value, keys: &[&str]) -> Option<f64> {
 }
 
 /// 解析企业配额响应：兼容 {data:{data:{…}}} / {data:{…}} / 字段位于顶层三种包装，
-/// 字段 camelCase / snake_case 双命名兼容（对齐参考项目 parse_enterprise_usage）
+/// 字段 camelCase / snake_case 双命名兼容
 fn parse_enterprise_usage(response: &Value) -> Option<EnterpriseUsage> {
     let data = response.get("data").unwrap_or(&Value::Null);
     let nested = data.get("data").unwrap_or(&Value::Null);
@@ -271,7 +271,7 @@ async fn resolve_enterprise_id(acc: &Account) -> Option<String> {
 }
 
 /// 企业配额查询：注入 X-Enterprise-Id / X-Tenant-Id 请求头，POST 空 body；
-/// 不限量返回 (None, []) 不落 0/0 快照（与参考项目同口径，避免统计页误显示余额 0）
+/// 不限量返回 (None, []) 不落 0/0 快照（避免统计页误显示余额 0）
 async fn fetch_enterprise_credits(
     db: &Arc<Database>,
     acc: &Account,
@@ -351,7 +351,10 @@ pub async fn refresh_account_with_action(
             db.log(
                 "info",
                 action,
-                &format!("账号 {} 正在签到/其它请求中，已跳过本次积分查询", account_id),
+                &format!(
+                    "账号 {} 正在签到/其它请求中，已跳过本次积分查询",
+                    account_id
+                ),
             );
             CreditResult {
                 account_id: account_id.to_string(),
@@ -390,6 +393,9 @@ pub async fn refresh_account_with_action_guarded(
         "trae" => crate::platform::trae::api::fetch_credits(&acc)
             .await
             .map(|(b, e)| (Some(b), e, "查询成功".to_string())),
+        "qoder_cn" => crate::platform::qoder_cn::api::fetch_credits(&acc)
+            .await
+            .map(|(b, e)| (Some(b), e, "查询成功".to_string())),
         _ if is_enterprise(&acc) => fetch_enterprise_credits(db, &acc).await,
         _ => fetch_credits(&acc)
             .await
@@ -419,5 +425,137 @@ pub async fn refresh_account_with_action_guarded(
                 message: e,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ===== 响应信封下钻 =====
+
+    #[test]
+    fn extract_accounts_from_nested_envelopes() {
+        let v = json!({"Response": {"Data": {"Accounts": [{"CycleCapacitySize": 100}]}}});
+        let arr = extract_resource_accounts(&v).expect("应下钻到 Accounts");
+        assert_eq!(arr.len(), 1);
+
+        let v = json!({"data": {"data": {"Accounts": [{"a": 1}, {"a": 2}]}}});
+        assert_eq!(extract_resource_accounts(&v).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn extract_accounts_accepts_bare_array() {
+        let v = json!([{"CapacityRemain": 10}, {"CapacityRemain": 20}]);
+        assert_eq!(extract_resource_accounts(&v).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn extract_accounts_rejects_unknown_shapes() {
+        assert!(extract_resource_accounts(&json!({"Data": {"foo": 1}})).is_none());
+        assert!(extract_resource_accounts(&json!(42)).is_none());
+        assert!(extract_resource_accounts(&json!(null)).is_none());
+    }
+
+    // ===== 单套餐剩余额度 =====
+
+    #[test]
+    fn package_remain_prefers_cycle_fields() {
+        // CycleCapacitySize > 0 时 CapacityRemain 必须被忽略
+        let item = json!({
+            "CycleCapacitySize": 100,
+            "CycleCapacityRemain": 80,
+            "CapacityRemain": 999
+        });
+        assert_eq!(package_remain(&item), 80.0);
+    }
+
+    #[test]
+    fn package_remain_corrects_with_cycle_used() {
+        // size 100 / remain 80 → 推算 used 20；上游 CycleCapacityUsed=35 更可靠
+        let item = json!({
+            "CycleCapacitySize": 100,
+            "CycleCapacityRemain": 80,
+            "CycleCapacityUsed": 35
+        });
+        assert_eq!(package_remain(&item), 65.0);
+    }
+
+    #[test]
+    fn package_remain_clamps_out_of_range_values() {
+        let negative = json!({"CycleCapacitySize": 100, "CycleCapacityRemain": -10});
+        assert_eq!(package_remain(&negative), 0.0, "负值必须钳到 0");
+        let oversized = json!({"CycleCapacitySize": 100, "CycleCapacityRemain": 500});
+        assert_eq!(
+            package_remain(&oversized),
+            100.0,
+            "无 Used 反修正时应钳到总量"
+        );
+        // Used 比「size - remain」推算值更可靠时会反修正：remain 先钳到 100，
+        // 再被 Used=1 修正为 99。锁定这一优先级，避免误改回钳制值。
+        let corrected = json!({
+            "CycleCapacitySize": 100,
+            "CycleCapacityRemain": 500,
+            "CycleCapacityUsed": 1
+        });
+        assert_eq!(package_remain(&corrected), 99.0);
+        // used 大于 size 时保留原 remain，不能算出负额度
+        let inconsistent = json!({
+            "CycleCapacitySize": 100,
+            "CycleCapacityRemain": 80,
+            "CycleCapacityUsed": 500
+        });
+        assert_eq!(package_remain(&inconsistent), 80.0);
+    }
+
+    #[test]
+    fn package_remain_falls_back_to_capacity_remain() {
+        let item = json!({"CycleCapacitySize": 0, "CapacityRemain": 42.5});
+        assert_eq!(package_remain(&item), 42.5);
+        let empty = json!({});
+        assert_eq!(package_remain(&empty), 0.0);
+    }
+
+    // ===== 到期时间与取整 =====
+
+    #[test]
+    fn package_expiry_treats_wallclock_as_utc8() {
+        let item = json!({"CycleEndTime": "2026-12-01 00:00:00"});
+        let naive =
+            NaiveDateTime::parse_from_str("2026-12-01 00:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        assert_eq!(
+            package_expiry(&item),
+            Some(naive.and_utc().timestamp() - 8 * 3600)
+        );
+    }
+
+    #[test]
+    fn package_expiry_handles_missing_or_bad_values() {
+        assert_eq!(package_expiry(&json!({})), None);
+        assert_eq!(package_expiry(&json!({"CycleEndTime": ""})), None);
+        assert_eq!(package_expiry(&json!({"CycleEndTime": "not-a-date"})), None);
+    }
+
+    #[test]
+    fn round_credits_keeps_at_most_two_decimals() {
+        assert_eq!(round_credits(10.0), 10.0);
+        assert_eq!(round_credits(10.126), 10.13);
+        assert_eq!(round_credits(10.001), 10.0);
+    }
+
+    #[test]
+    fn enterprise_detection_accepts_id_or_type() {
+        let mut acc = Account::default();
+        assert!(!is_enterprise(&acc));
+        acc.enterprise_id = "ent-1".to_string();
+        assert!(is_enterprise(&acc));
+        acc.enterprise_id.clear();
+        acc.account_type = "ultimate".to_string();
+        assert!(is_enterprise(&acc));
+        acc.account_type = "exclusive".to_string();
+        assert!(is_enterprise(&acc));
+        acc.account_type = "personal".to_string();
+        assert!(!is_enterprise(&acc));
     }
 }

@@ -1,16 +1,18 @@
 use serde::Serialize;
 
-/// 四个客户端的本地安装路径（未安装为空字符串）
+/// 客户端的本地安装路径（未安装为空字符串）
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ClientPaths {
     pub trae: String,
     pub workbuddy: String,
     pub workbuddy_ai: String,
     pub codebuddy_cn: String,
+    pub qoder_cn: String,
 }
 
 /// 按 DisplayName 匹配卸载项：TRAE/TRAE CN、WorkBuddy（排除 Manager/Switch 等第三方）、
-/// WorkBuddy AI（国际版客户端，须先于 WorkBuddy 判定）、CodeBuddy CN/CodeBuddy
+/// WorkBuddy AI（国际版客户端，须先于 WorkBuddy 判定）、CodeBuddy CN/CodeBuddy、
+/// Qoder CN（排除 Qoder IDE / Qoder Work 等其它产品线）
 fn classify(display_name: &str) -> Option<&'static str> {
     let n = display_name.trim();
     let lower = n.to_lowercase();
@@ -25,12 +27,23 @@ fn classify(display_name: &str) -> Option<&'static str> {
     if lower.starts_with("workbuddy ai") {
         return Some("workbuddy_ai");
     }
-    // switch 同理排除第三方工具（如 workbuddy-switch），官方客户端名不含该词
+    // 排除第三方管理工具（其名称含 manager / switch），官方客户端名不含该词
     if lower.starts_with("workbuddy") && !lower.contains("manager") && !lower.contains("switch") {
         return Some("workbuddy");
     }
     if lower.starts_with("codebuddy") {
         return Some("codebuddy_cn");
+    }
+    if lower.starts_with("qoder cn") {
+        return Some("qoder_cn");
+    }
+    if lower.starts_with("qoder") {
+        // 其它 Qoder 产品线不是 CN 客户端；早期按前缀宽泛匹配会把它们的
+        // 安装路径写进 Qoder CN 设置，导致切换与进程检测全部指向错误客户端
+        if lower.contains("ide") || lower.contains("work") || lower.contains("cli") {
+            return None;
+        }
+        return Some("qoder_cn");
     }
     None
 }
@@ -41,9 +54,11 @@ fn is_self_exe(path: &str) -> bool {
         .file_name()
         .and_then(|n| n.to_str())
         .map(|s| s.to_lowercase());
-    let self_name = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.file_name().and_then(|n| n.to_str()).map(|s| s.to_lowercase()));
+    let self_name = std::env::current_exe().ok().and_then(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_lowercase())
+    });
     match (name, self_name) {
         (Some(a), Some(b)) => a == b,
         _ => false,
@@ -65,6 +80,58 @@ fn valid_exe(path: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// DisplayIcon 指向 .ico 时（Qoder CN 安装版写的是 uninstallerIcon.ico），
+/// 在其所在目录找主程序：优先与安装目录同名的 exe，排除卸载/安装器。
+fn exe_from_icon_dir(icon: &str) -> Option<String> {
+    let raw = icon
+        .trim()
+        .trim_matches('"')
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let dir = std::path::Path::new(raw).parent()?;
+    let mut candidates: Vec<String> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let full = path.to_string_lossy().to_string();
+            let lower = full.to_lowercase();
+            let is_exe = path
+                .extension()
+                .is_some_and(|x| x.to_string_lossy().eq_ignore_ascii_case("exe"));
+            (is_exe
+                && !lower.contains("unins")
+                && !lower.contains("setup")
+                && !lower.contains("installer"))
+            .then_some(full)
+        })
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let dir_name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if !dir_name.is_empty() {
+        let wanted = format!("{dir_name}.exe");
+        if let Some(found) = candidates
+            .iter()
+            .find(|s| s.to_lowercase().ends_with(&wanted))
+        {
+            return Some(found.clone());
+        }
+    }
+    candidates.sort();
+    candidates.into_iter().next()
 }
 
 /// 从注册表卸载项读取客户端安装路径（支持自定义安装目录，如 D 盘）
@@ -104,6 +171,7 @@ fn detect_from_registry() -> ClientPaths {
             "trae" => !out.trae.is_empty(),
             "workbuddy" => !out.workbuddy.is_empty(),
             "workbuddy_ai" => !out.workbuddy_ai.is_empty(),
+            "qoder_cn" => !out.qoder_cn.is_empty(),
             _ => !out.codebuddy_cn.is_empty(),
         };
         if done {
@@ -113,29 +181,38 @@ fn detect_from_registry() -> ClientPaths {
             .get("DisplayIcon")
             .and_then(|s| s.as_str())
             .unwrap_or("");
-        let found = valid_exe(icon).or_else(|| {
-            // InstallLocation + 目录下第一个 exe（排除卸载程序）
-            let dir = item
-                .get("InstallLocation")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .trim()
-                .trim_matches('"');
-            if dir.is_empty() {
-                return None;
-            }
-            let rd = std::fs::read_dir(dir).ok()?;
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.extension().is_some_and(|x| x == "exe") {
-                    let s = p.to_string_lossy().to_string();
-                    if !s.to_lowercase().contains("unins") {
-                        return Some(s);
+        let found = valid_exe(icon)
+            .or_else(|| {
+                // Qoder CN 安装版的 DisplayIcon 是 .ico，从同目录推主程序
+                if client == "qoder_cn" {
+                    exe_from_icon_dir(icon)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                // InstallLocation + 目录下第一个 exe（排除卸载程序）
+                let dir = item
+                    .get("InstallLocation")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .trim_matches('"');
+                if dir.is_empty() {
+                    return None;
+                }
+                let rd = std::fs::read_dir(dir).ok()?;
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.extension().is_some_and(|x| x == "exe") {
+                        let s = p.to_string_lossy().to_string();
+                        if !s.to_lowercase().contains("unins") {
+                            return Some(s);
+                        }
                     }
                 }
-            }
-            None
-        });
+                None
+            });
         if let Some(path) = found {
             // 兜底：即使 DisplayName 绕过了分类排除，也不允许把自身当作客户端
             if is_self_exe(&path) {
@@ -145,6 +222,7 @@ fn detect_from_registry() -> ClientPaths {
                 "trae" => out.trae = path,
                 "workbuddy" => out.workbuddy = path,
                 "workbuddy_ai" => out.workbuddy_ai = path,
+                "qoder_cn" => out.qoder_cn = path,
                 _ => out.codebuddy_cn = path,
             }
         }
@@ -160,4 +238,42 @@ fn detect_from_registry() -> ClientPaths {
 /// 仅从注册表卸载项探测。找不到即视为未安装，留空。
 pub fn detect_client_paths() -> ClientPaths {
     detect_from_registry()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qoder_cn_is_not_mixed_with_other_product_lines() {
+        assert_eq!(classify("Qoder CN 0.5.13"), Some("qoder_cn"));
+        assert_eq!(classify("Qoder CN IDE"), Some("qoder_cn"));
+        assert_eq!(classify("Qoder IDE (User)"), None);
+        assert_eq!(classify("Qoder Work"), None);
+        assert_eq!(classify("Qoder CLI"), None);
+        // 旧安装形态可能只叫 Qoder，仍归到 CN
+        assert_eq!(classify("Qoder"), Some("qoder_cn"));
+    }
+
+    #[test]
+    fn self_and_third_party_names_are_excluded() {
+        assert_eq!(classify("TraeBuddy Keeper"), None);
+        assert_eq!(classify("WorkBuddy Manager"), None);
+        assert_eq!(classify("CodeBuddy CN"), Some("codebuddy_cn"));
+    }
+
+    #[test]
+    fn icon_dir_picks_main_exe_not_uninstaller() {
+        let dir = std::env::temp_dir().join("tbk_clients_icon_test/Qoder CN");
+        let _ = std::fs::create_dir_all(&dir);
+        let main = dir.join("Qoder CN.exe");
+        let unins = dir.join("Uninstall Qoder CN.exe");
+        std::fs::write(&main, b"").unwrap();
+        std::fs::write(&unins, b"").unwrap();
+        let icon = dir.join("uninstallerIcon.ico");
+        std::fs::write(&icon, b"").unwrap();
+        let found = exe_from_icon_dir(&icon.to_string_lossy());
+        assert_eq!(found.as_deref(), Some(main.to_string_lossy().as_ref()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

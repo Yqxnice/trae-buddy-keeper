@@ -17,6 +17,7 @@ export function formatRelative(ts: number): string {
 
 export function platformLabel(p: string): string {
   if (p === "trae") return "TRAE";
+  if (p === "qoder_cn") return "Qoder CN";
   if (p === "codebuddy_cn") return "CodeBuddy CN";
   return "WorkBuddy";
 }

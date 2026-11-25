@@ -1,6 +1,6 @@
 //! TRAE 云端用量统计（数据源，供 token_stats 作为第四个 source 聚合）。
 //!
-//! 逆向自网页版 dashboard#usage 页面（参考 TraeTools 实现）：
+//! 网页版 dashboard#usage 页面的云端会话用量接口：
 //! `POST /trae/api/v1/pay/query_user_usage_group_by_session`，认证与网页业务
 //! 接口一致（Cloud-IDE-JWT + Origin/Referer，无需设备头）。响应的
 //! `user_usage_group_by_sessions[]` 是按会话聚合的用量，token 四项
@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use super::api::{authed, TRAE_BASE};
 
-/// 每页条数与最大翻页数（与参考实现一致，上限 400 条会话防失控）。
+/// 每页条数与最大翻页数（上限 400 条会话防失控）。
 const PAGE_SIZE: i64 = 20;
 const MAX_PAGES: i64 = 20;
 

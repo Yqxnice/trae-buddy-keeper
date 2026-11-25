@@ -17,7 +17,7 @@ import { platformLabel } from "@/lib/utils";
 import "./Settings.css";
 
 /** 定时签到可选的平台范围（CodeBuddy CN 与 WorkBuddy 同账号体系，随 WorkBuddy 一起签到） */
-const SCHED_PLATFORM_KEYS = ["trae", "workbuddy"] as const;
+const SCHED_PLATFORM_KEYS = ["trae", "workbuddy", "qoder_cn"] as const;
 
 export function SettingsPage() {
   const pushToast = useUIStore((s) => s.pushToast);
@@ -234,7 +234,7 @@ export function SettingsPage() {
   };
 
   const detectOne = async (
-    key: "trae" | "workbuddy" | "workbuddy_ai" | "codebuddy_cn"
+    key: "trae" | "workbuddy" | "workbuddy_ai" | "codebuddy_cn" | "qoder_cn" | "qoder_cn"
   ) => {
     setDetecting(key);
     try {
@@ -248,6 +248,8 @@ export function SettingsPage() {
             ? "client_path_workbuddy"
             : key === "workbuddy_ai"
             ? "client_path_workbuddy_ai"
+            : key === "qoder_cn"
+            ? "client_path_qoder_cn"
             : "client_path_codebuddy_cn";
         const next = { ...appSettings, [field]: found };
         saveAppNow(next);
@@ -412,6 +414,7 @@ export function SettingsPage() {
               field: "client_path_workbuddy_ai" as const,
             },
             { key: "codebuddy_cn", label: "CodeBuddy CN", field: "client_path_codebuddy_cn" as const },
+            { key: "qoder_cn", label: "Qoder CN", field: "client_path_qoder_cn" as const },
           ]
         ).map((c) => (
           <div className="set-row" key={c.key}>
@@ -429,7 +432,7 @@ export function SettingsPage() {
               <Button
                 disabled={detecting !== null}
                 onClick={() =>
-                  detectOne(c.key as "trae" | "workbuddy" | "workbuddy_ai" | "codebuddy_cn")
+                  detectOne(c.key as "trae" | "workbuddy" | "workbuddy_ai" | "codebuddy_cn" | "qoder_cn")
                 }
               >
                 <FolderSearch />

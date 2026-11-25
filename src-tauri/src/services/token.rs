@@ -35,6 +35,8 @@ impl TokenManager {
         map.insert(account_id.to_string(), Utc::now().timestamp());
     }
 
+    /// 自动巡检专用：仅在 24h 内到期（含已过期）时续期。
+    /// 手动入口直接走 `renew`，不受这个窗口限制。
     pub async fn auto_renew_if_needed(&self, account_id: &str) -> Result<Option<String>> {
         let acc = self
             .db
@@ -48,6 +50,8 @@ impl TokenManager {
         self.renew(account_id).await
     }
 
+    /// 手动续期入口：不设到期窗口，任意账号可随时调用；
+    /// 仅保留单账号 5 分钟限频，避免误触与上游风控。
     pub async fn renew(&self, account_id: &str) -> Result<Option<String>> {
         let acc = self
             .db
@@ -78,6 +82,21 @@ impl TokenManager {
             "workbuddy" => {
                 let (new_access, new_refresh, expires_at) =
                     crate::platform::workbuddy::api::refresh_access_token(&acc).await?;
+                self.db.update_account_tokens(
+                    account_id,
+                    &new_access,
+                    &new_refresh,
+                    expires_at,
+                    acc.refresh_token_expires_at,
+                )?;
+                self.mark_refreshed(account_id).await;
+                Ok(Some("续期成功".to_string()))
+            }
+            "qoder_cn" => {
+                let (new_access, new_refresh, expires_at) =
+                    crate::platform::qoder_cn::api::refresh_access_token(&acc)
+                        .await
+                        .map_err(|e| anyhow!("{e}"))?;
                 self.db.update_account_tokens(
                     account_id,
                     &new_access,

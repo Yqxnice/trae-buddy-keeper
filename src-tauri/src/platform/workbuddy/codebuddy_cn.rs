@@ -1,6 +1,6 @@
 //! CodeBuddy CN（IDE）账号切换。
 //!
-//! 实现参考了开源项目 workbuddy-switch。
+//! CodeBuddy CN 客户端登录态注入。
 //!
 //! 机制与 WorkBuddy 桌面端完全不同：CodeBuddy CN 是 VS Code 系 IDE，登录态保存在
 //! `%APPDATA%\CodeBuddy CN\User\globalStorage\state.vscdb` 的 Safe Storage secret 行
@@ -42,7 +42,7 @@ pub fn data_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("CodeBuddy CN"))
 }
 
-/// state.vscdb 路径：按参考项目候选顺序解析，均不存在时用首选路径（并建好父目录）
+/// state.vscdb 路径：按候选顺序解析，均不存在时用首选路径（并建好父目录）
 fn resolve_state_db_path() -> Result<PathBuf, String> {
     let root = data_dir().ok_or("无法定位 CodeBuddy CN 数据目录")?;
     let candidates = [
@@ -121,7 +121,7 @@ fn encryption_key(db_path: &Path) -> Result<Vec<u8>, String> {
     dpapi_decrypt(&bytes[5..])
 }
 
-/// v10 加密：b"v10" + 12 字节随机 nonce + AES-256-GCM 密文（对齐参考项目）
+/// v10 加密：b"v10" + 12 字节随机 nonce + AES-256-GCM 密文
 #[cfg(target_os = "windows")]
 fn encrypt_v10(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, String> {
     use aes_gcm::aead::{Aead, AeadCore, OsRng};
@@ -148,7 +148,7 @@ fn encrypt_v10(_key: &[u8], _plaintext: &[u8]) -> Result<Vec<u8>, String> {
     Err("当前仅支持 Windows 注入 CodeBuddy CN".to_string())
 }
 
-// ---------- 会话 JSON（对齐参考实现） ----------
+// ---------- 会话 JSON ----------
 
 /// 复合 token：`<uid>+<access_token>`；无 uid 时退化为裸 token
 fn format_token(acc: &Account) -> String {
@@ -239,7 +239,7 @@ fn inject_session(plaintext: &str) -> Result<PathBuf, String> {
     Ok(db_path)
 }
 
-// ---------- 进程控制（对齐同目录 switch.rs 的方式） ----------
+// ---------- 进程控制 ----------
 
 #[cfg(target_os = "windows")]
 fn client_running() -> bool {

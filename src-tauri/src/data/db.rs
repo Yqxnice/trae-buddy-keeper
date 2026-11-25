@@ -1,8 +1,28 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection};
 use std::sync::{Mutex, OnceLock};
 
+use crate::data::crypto;
 use crate::data::models::*;
+
+/// 把明文凭证封装为落库值；DPAPI 错误统一转成 anyhow，避免 `?` 在 Result<_, String> 上失效。
+fn seal_for_store(v: &str) -> Result<String> {
+    crypto::seal(v).map_err(|e| anyhow!("{e}"))
+}
+
+/// 读取列中的凭证：旧明文透传、密文解密。解密失败时返回空串而非密文乱码，
+/// 让上层「缺少 token」判定生效并引导重新授权，绝不把密文当 token 发到网络。
+fn read_secret(r: &rusqlite::Row, col: &str) -> String {
+    let stored: String = r.get(col).unwrap_or_default();
+    match crypto::open(&stored) {
+        Ok(v) => v,
+        Err(e) => {
+            let id: String = r.get("id").unwrap_or_default();
+            eprintln!("[db] 账户 {id} 的 {col} 解密失败：{e}，按空凭证处理");
+            String::new()
+        }
+    }
+}
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -21,6 +41,12 @@ impl Database {
             emitter: OnceLock::new(),
         };
         db.init()?;
+        // 老库首次启动就地升级：四列明文凭证改写为 DPAPI 密文。
+        // 迁移失败不阻断启动（下次写入或下次启动会重试），但必须留下可见日志。
+        if let Err(e) = db.migrate_secrets() {
+            eprintln!("[db] 凭证加密迁移失败（下次启动会重试）：{e}");
+            db.log("warn", "安全升级", &format!("凭证加密迁移失败：{e}"));
+        }
         Ok(db)
     }
 
@@ -49,9 +75,85 @@ impl Database {
     /// 从备份文件恢复到当前连接（运行中安全执行，覆盖全部表数据）
     pub fn restore_from(&self, src: &std::path::Path) -> Result<()> {
         let src_conn = Connection::open(src)?;
-        let mut dst = self.conn.lock().unwrap();
-        let backup = rusqlite::backup::Backup::new(&src_conn, &mut dst)?;
-        backup.run_to_completion(64, std::time::Duration::from_millis(5), None)?;
+        {
+            let mut dst = self.conn.lock().unwrap();
+            let backup = rusqlite::backup::Backup::new(&src_conn, &mut dst)?;
+            backup.run_to_completion(64, std::time::Duration::from_millis(5), None)?;
+        } // 必须先释放连接锁，migrate_secrets 会再次加锁并写日志
+          // 旧备份可能是明文；来自其他 Windows 用户的密文则会在审计中被标记。
+          // 迁移失败不影响已完成的恢复，留待下次启动重试。
+        if let Err(e) = self.migrate_secrets() {
+            eprintln!("[db] 恢复后凭证加密迁移失败：{e}");
+        }
+        Ok(())
+    }
+
+    /// 一次性迁移：把 accounts 中残留的明文凭证改写为 DPAPI 密文。
+    /// 同时审计已加密但无法解密的行（跨用户/跨设备恢复的备份），写入系统日志提示重新授权。
+    pub fn migrate_secrets(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let (legacy, broken) = {
+            let mut stmt = conn.prepare(
+                "SELECT id, access_token, refresh_token, cookies, device_key FROM accounts",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0).unwrap_or_default(),
+                    r.get::<_, String>(1).unwrap_or_default(),
+                    r.get::<_, String>(2).unwrap_or_default(),
+                    r.get::<_, String>(3).unwrap_or_default(),
+                    r.get::<_, String>(4).unwrap_or_default(),
+                ))
+            })?;
+            let mut legacy = Vec::new();
+            let mut broken = 0usize;
+            for row in rows {
+                let (id, at, rt, ck, dk) = row?;
+                if [&at, &rt, &ck, &dk]
+                    .iter()
+                    .any(|v| crypto::is_sealed(v) && crypto::open(v).is_err())
+                {
+                    broken += 1;
+                }
+                if [&at, &rt, &ck, &dk]
+                    .iter()
+                    .any(|v| !v.is_empty() && !crypto::is_sealed(v))
+                {
+                    legacy.push((id, at, rt, ck, dk));
+                }
+            }
+            (legacy, broken)
+        };
+        let migrated = legacy.len();
+        for (id, at, rt, ck, dk) in legacy {
+            conn.execute(
+                "UPDATE accounts SET access_token=?1, refresh_token=?2, cookies=?3, device_key=?4 WHERE id=?5",
+                params![
+                    seal_for_store(&at)?,
+                    seal_for_store(&rt)?,
+                    seal_for_store(&ck)?,
+                    seal_for_store(&dk)?,
+                    id
+                ],
+            )?;
+        }
+        drop(conn); // self.log 需要再次加锁，避免死锁
+        if migrated > 0 {
+            self.log(
+                "info",
+                "安全升级",
+                &format!("已将 {migrated} 个账户的凭据迁移为 DPAPI 加密存储"),
+            );
+        }
+        if broken > 0 {
+            self.log(
+                "warn",
+                "安全升级",
+                &format!(
+                    "{broken} 个账户的加密凭据无法解密（可能来自其他 Windows 用户或设备的备份），这些账户需重新授权登录"
+                ),
+            );
+        }
         Ok(())
     }
 
@@ -185,8 +287,10 @@ impl Database {
                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)"#,
             params![
                 acc.id, acc.platform, acc.name, acc.email, acc.avatar, acc.uid, acc.domain,
-                acc.enterprise_id, acc.account_type, acc.device_id, acc.device_key, acc.machine_id,
-                acc.access_token, acc.refresh_token, acc.cookies, acc.token_expires_at,
+                acc.enterprise_id, acc.account_type, acc.device_id,
+                seal_for_store(&acc.device_key)?, acc.machine_id,
+                seal_for_store(&acc.access_token)?, seal_for_store(&acc.refresh_token)?,
+                seal_for_store(&acc.cookies)?, acc.token_expires_at,
                 acc.refresh_token_expires_at, acc.last_checkin_time, acc.checkin_status,
                 acc.fail_count, acc.cooldown_until, acc.created_at, acc.updated_at,
             ],
@@ -207,8 +311,8 @@ impl Database {
             r#"UPDATE accounts SET access_token=?1, refresh_token=?2, token_expires_at=?3,
                 refresh_token_expires_at=?4, updated_at=?5 WHERE id=?6"#,
             params![
-                access_token,
-                refresh_token,
+                seal_for_store(access_token)?,
+                seal_for_store(refresh_token)?,
                 token_expires_at,
                 refresh_token_expires_at,
                 chrono::Utc::now().timestamp(),
@@ -234,9 +338,9 @@ impl Database {
             params![
                 name,
                 email,
-                access_token,
-                refresh_token,
-                cookies,
+                seal_for_store(access_token)?,
+                seal_for_store(refresh_token)?,
+                seal_for_store(cookies)?,
                 chrono::Utc::now().timestamp(),
                 id
             ],
@@ -458,6 +562,17 @@ impl Database {
         Ok(())
     }
 
+    /// 更新 Qoder CN 账号绑定的设备指纹（`Cosy-MachineId`）。
+    /// 指纹是账号与服务端信任分桶的绑定关系，一次写入后不得随签到结果轮换。
+    pub fn update_account_machine_id(&self, id: &str, machine_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE accounts SET machine_id=?1, updated_at=?2 WHERE id=?3",
+            params![machine_id, chrono::Utc::now().timestamp(), id],
+        )?;
+        Ok(())
+    }
+
     /// 重新授权时同步设备身份（设备号/设备密钥/机器码），并刷新凭据。
     /// 换证签发的 JWT 绑定该设备，所以重新登录必须把设备身份一起覆盖回库。
     pub fn update_account_device_identity(
@@ -472,7 +587,7 @@ impl Database {
             "UPDATE accounts SET device_id=?1, device_key=?2, machine_id=?3, updated_at=?4 WHERE id=?5",
             params![
                 device_id,
-                device_key,
+                seal_for_store(device_key)?,
                 machine_id,
                 chrono::Utc::now().timestamp(),
                 id
@@ -636,9 +751,9 @@ fn row_to_account(r: &rusqlite::Row) -> rusqlite::Result<Account> {
         domain: r.get("domain").unwrap_or_default(),
         enterprise_id: r.get("enterprise_id").unwrap_or_default(),
         account_type: r.get("account_type").unwrap_or_default(),
-        access_token: r.get("access_token")?,
-        refresh_token: r.get("refresh_token")?,
-        cookies: r.get("cookies")?,
+        access_token: read_secret(r, "access_token"),
+        refresh_token: read_secret(r, "refresh_token"),
+        cookies: read_secret(r, "cookies"),
         token_expires_at: r.get("token_expires_at")?,
         refresh_token_expires_at: r.get("refresh_token_expires_at")?,
         last_checkin_time: r.get("last_checkin_time")?,
@@ -653,7 +768,7 @@ fn row_to_account(r: &rusqlite::Row) -> rusqlite::Result<Account> {
             .unwrap_or_default(),
         credits_fetched_at: r.get("credits_fetched_at")?,
         device_id: r.get("device_id").unwrap_or_default(),
-        device_key: r.get("device_key").unwrap_or_default(),
+        device_key: read_secret(r, "device_key"),
         machine_id: r.get("machine_id").unwrap_or_default(),
         avatar: r.get("avatar")?,
     })
@@ -669,4 +784,103 @@ fn row_to_record(r: &rusqlite::Row) -> rusqlite::Result<CheckinRecord> {
         message: r.get(5)?,
         created_at: r.get(6)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_account() -> Account {
+        Account {
+            id: "acc-1".into(),
+            platform: "trae".into(),
+            name: "测试账户".into(),
+            access_token: "at-secret".into(),
+            refresh_token: "rt-secret".into(),
+            cookies: "cookie=1".into(),
+            device_key: "deadbeef".into(),
+            ..Default::default()
+        }
+    }
+
+    fn stored_token(db: &Database) -> String {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT access_token FROM accounts WHERE id='acc-1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn secrets_survive_a_full_db_roundtrip() {
+        let db = Database::new(":memory:").unwrap();
+        db.insert_account(&sample_account()).unwrap();
+        let acc = db.get_account("acc-1").unwrap().unwrap();
+        assert_eq!(acc.access_token, "at-secret");
+        assert_eq!(acc.refresh_token, "rt-secret");
+        assert_eq!(acc.cookies, "cookie=1");
+        assert_eq!(acc.device_key, "deadbeef");
+        // 列表接口同样必须解密，否则签到/续期拿到的是密文
+        assert_eq!(db.list_accounts().unwrap()[0].access_token, "at-secret");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stored_values_are_ciphertext_not_plaintext() {
+        let db = Database::new(":memory:").unwrap();
+        db.insert_account(&sample_account()).unwrap();
+        let stored = stored_token(&db);
+        assert!(crypto::is_sealed(&stored), "落库值必须带 dpapi 标记");
+        assert!(!stored.contains("at-secret"), "库中不得残留 token 明文");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_plaintext_is_migrated_and_still_readable() {
+        let db = Database::new(":memory:").unwrap();
+        db.insert_account(&sample_account()).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE accounts SET access_token='legacy-at', refresh_token='', cookies='legacy-ck', device_key='' WHERE id='acc-1'",
+                [],
+            )
+            .unwrap();
+        }
+        db.migrate_secrets().unwrap();
+        let acc = db.get_account("acc-1").unwrap().unwrap();
+        assert_eq!(acc.access_token, "legacy-at");
+        assert_eq!(acc.cookies, "legacy-ck");
+        assert!(crypto::is_sealed(&stored_token(&db)));
+        // 二次迁移必须幂等，不能把密文再封一层
+        db.migrate_secrets().unwrap();
+        assert_eq!(
+            db.get_account("acc-1").unwrap().unwrap().access_token,
+            "legacy-at"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn broken_ciphertext_is_treated_as_missing_credential() {
+        let db = Database::new(":memory:").unwrap();
+        db.insert_account(&sample_account()).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE accounts SET access_token='dpapi:v1:AAAA' WHERE id='acc-1'",
+                [],
+            )
+            .unwrap();
+        }
+        // 绝不把无法解密的乱码发给官方接口
+        assert_eq!(db.get_account("acc-1").unwrap().unwrap().access_token, "");
+        db.migrate_secrets().unwrap(); // 审计只记日志，不应破坏其它列
+        assert_eq!(
+            db.get_account("acc-1").unwrap().unwrap().cookies,
+            "cookie=1"
+        );
+    }
 }

@@ -1,4 +1,4 @@
-//! 实现参考了开源项目 workbuddy-switch。
+//! WorkBuddy 官方接口：签到、状态查询与凭证续期。
 
 use anyhow::{anyhow, Result};
 use reqwest::Client;
@@ -161,7 +161,7 @@ pub async fn checkin_status(acc: &Account) -> Result<bool> {
     Err(last)
 }
 
-/// 用 refreshToken 换新 accessToken（对齐参考项目 issue #40 口径）：
+/// 用 refreshToken 换新 accessToken：
 /// POST {chat}/v2/plugin/auth/token/refresh，refreshToken 走 X-Refresh-Token 头，
 /// 带 X-Auth-Refresh-Source: plugin；响应可能是裸 {accessToken,...} 或包一层 data。
 /// expiresIn 缺省时沿用旧到期时间（与上游 preserveExpiry 同口径）。

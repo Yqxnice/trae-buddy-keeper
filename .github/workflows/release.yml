@@ -55,10 +55,25 @@ jobs:
 
       - name: 同步版本号（以标签为准）
         shell: bash
+        # 四处都要改：前端包名、lock、Tauri 配置、Rust 包。只改 tauri.conf.json 会让
+        # 发版产物与 package.json / Cargo.toml 的版本号长期漂移，且 npm ci 会读到旧 lock 版本。
         run: |
           VER="${GITHUB_REF_NAME#v}"
-          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$VER\"/" src-tauri/tauri.conf.json
-          echo "应用版本号已同步为 $VER"
+          node -e '
+            const fs = require("fs");
+            const ver = process.argv[1];
+            for (const f of ["package.json", "package-lock.json", "src-tauri/tauri.conf.json"]) {
+              const doc = JSON.parse(fs.readFileSync(f, "utf8"));
+              doc.version = ver;
+              if (f === "package-lock.json") doc.packages[""].version = ver;
+              fs.writeFileSync(f, JSON.stringify(doc, null, 2) + "\n");
+            }
+            const lock = "src-tauri/Cargo.lock";
+            fs.writeFileSync(lock, fs.readFileSync(lock, "utf8").replace(
+              /(name = "trae-buddy-keeper"\nversion = ")[^"]+(")/, `$1${ver}$2`));
+          ' "$VER"
+          sed -i "s/^version = \"[^\"]*\"/version = \"$VER\"/" src-tauri/Cargo.toml
+          echo "版本号已同步为 $VER（package.json / package-lock.json / tauri.conf.json / Cargo.toml / Cargo.lock）"
 
       - name: Build and release
         uses: tauri-apps/tauri-action@v0

@@ -1,6 +1,6 @@
 //! WorkBuddy 登录：腾讯插件授权协议（state 轮询模式）。
 //!
-//! 实现参考了开源项目 workbuddy-manager、workbuddy-switch。
+//! 腾讯插件授权协议：state 轮询登录。
 //!
 //! 流程：`POST /v2/plugin/auth/state` 获取 state 与授权链接 → 呼出系统浏览器打开
 //! 授权页（扫码或账号登录）→ 前端轮询 `poll_workbuddy_login` →

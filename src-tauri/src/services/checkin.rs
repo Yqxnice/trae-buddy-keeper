@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::data::db::Database;
 use crate::data::models::*;
+use crate::platform::qoder_cn::api as qoder_api;
 use crate::platform::trae::api as trae_api;
 use crate::platform::workbuddy::api as workbuddy_api;
 use crate::services::account_lock;
@@ -27,6 +28,14 @@ const BATCH_WAIT_POLL_MS: u64 = 2000;
 /// 设备号形态：12~20 位纯数字（客户端注册过的 Aha 设备号，15/16 位常见但非规则）
 fn is_aha_device(s: &str) -> bool {
     matches!(s.len(), 12..=20) && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// 剥离「账号未获活动投放」的内部标记；返回（是否确定性无活动，展示用文案）。
+fn split_no_campaign(message: String) -> (bool, String) {
+    match message.strip_prefix(qoder_api::NO_CAMPAIGN_PREFIX) {
+        Some(rest) => (true, rest.to_string()),
+        None => (false, message),
+    }
 }
 
 /// 签到触发来源：仅用于日志诊断，区分自动与人工触发
@@ -173,6 +182,35 @@ fn derived_device_id(seed: &str) -> String {
     )
 }
 
+/// Qoder CN 设备指纹形态：授权页与客户端 `machineid` 都是 UUID，也兼容 32/64 位 hex。
+fn is_machine_id(s: &str) -> bool {
+    let s = s.trim();
+    let uuid = s.len() == 36
+        && s.chars().filter(|c| *c == '-').count() == 4
+        && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+    let hex = (s.len() == 32 || s.len() == 64) && s.chars().all(|c| c.is_ascii_hexdigit());
+    uuid || hex
+}
+
+/// 由账号种子派生 UUID 形态的稳定指纹：同一账号恒定，不同账号互不相同。
+fn derived_machine_id(seed: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(seed.as_bytes());
+    let hex: String = digest
+        .iter()
+        .take(16)
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
 pub struct CheckinService {
     db: Arc<Database>,
     batch_lock: Arc<CheckinBatchLock>,
@@ -279,27 +317,51 @@ impl CheckinService {
             });
         }
 
-        let (success, points, message) = match acc.platform.as_str() {
+        let (success, points, raw_message) = match acc.platform.as_str() {
             "trae" => self.trae_checkin_with_reauth(&acc).await,
             "workbuddy" => workbuddy_api::do_checkin(&acc)
                 .await
                 .unwrap_or_else(|e| (false, 0, e.to_string())),
+            "qoder_cn" => {
+                let mut scoped = acc.clone();
+                scoped.machine_id = self.qoder_machine_id(&acc);
+                qoder_api::do_checkin(&scoped)
+                    .await
+                    .unwrap_or_else(|e| (false, 0, e))
+            }
             _ => (false, 0, "未知平台".to_string()),
         };
+
+        // 服务端按账号维度未下发活动是确定性结果，不是故障：按「跳过」呈现，
+        // 不累计失败数、不进入冷却，避免巡检反复重试一个当前领不到的账号。
+        let (no_campaign, message) = split_no_campaign(raw_message);
 
         let now_ts = Utc::now().timestamp();
         let rec = CheckinRecord {
             id: Uuid::new_v4().to_string(),
             account_id: acc.id.clone(),
             platform: acc.platform.clone(),
-            status: if success { "success" } else { "failed" }.to_string(),
+            status: if success {
+                "success"
+            } else if no_campaign {
+                "skipped"
+            } else {
+                "failed"
+            }
+            .to_string(),
             points,
             message: message.clone(),
             created_at: now_ts,
         };
         let _ = self.db.insert_checkin_record(&rec);
         self.db.log(
-            if success { "success" } else { "error" },
+            if success {
+                "success"
+            } else if no_campaign {
+                "info"
+            } else {
+                "error"
+            },
             "签到",
             &format!(
                 "[{}] {}：{}（{}）",
@@ -322,10 +384,10 @@ impl CheckinService {
             // billing 接口为准，这里不再假设 31 天有效期）
             if points > 0 {
                 let today = today_str();
-                let expiry = if acc.platform == "workbuddy" {
-                    0 // 未知，真实到期见 accounts.credits_expiries
-                } else {
-                    now_ts + 31 * 86400 // TRAE 签到积分 31 天有效期
+                let expiry = match acc.platform.as_str() {
+                    "workbuddy" => 0,                  // 未知，真实到期见 accounts.credits_expiries
+                    "qoder_cn" => now_ts + 30 * 86400, // 活动积分包独立 30 天有效期
+                    _ => now_ts + 31 * 86400,          // TRAE 签到积分 31 天有效期
                 };
                 let ph = PointsHistory {
                     id: Uuid::new_v4().to_string(),
@@ -347,6 +409,15 @@ impl CheckinService {
                 account_guard,
             )
             .await;
+        } else if no_campaign {
+            // 清掉此前误判累积的失败数与冷却；自然日巡检仍会照常重试
+            let _ = self.db.update_account_checkin(
+                &acc.id,
+                CheckinStatus::Idle.as_str(),
+                acc.last_checkin_time,
+                0,
+                0,
+            );
         } else {
             let mut new_fail = acc.fail_count + 1;
             let settings = load_checkin_settings(&self.db);
@@ -379,7 +450,7 @@ impl CheckinService {
             account_name: acc.name.clone(),
             platform: acc.platform.clone(),
             success,
-            skipped: false,
+            skipped: no_campaign,
             points,
             message,
         })
@@ -410,16 +481,17 @@ impl CheckinService {
                     .unwrap_or(false)
             }
             "workbuddy" => workbuddy_api::checkin_status(acc).await.unwrap_or(false),
+            "qoder_cn" => {
+                let mut scoped = acc.clone();
+                scoped.machine_id = self.qoder_machine_id(acc);
+                qoder_api::checkin_status(&scoped).await.unwrap_or(false)
+            }
             _ => return,
         };
         if signed {
-            let _ = self.db.update_account_checkin(
-                &acc.id,
-                CheckinStatus::Success.as_str(),
-                now,
-                0,
-                0,
-            );
+            let _ =
+                self.db
+                    .update_account_checkin(&acc.id, CheckinStatus::Success.as_str(), now, 0, 0);
         }
     }
 
@@ -428,7 +500,8 @@ impl CheckinService {
         &self,
         platforms: Option<&[String]>,
     ) -> Result<Vec<CheckinResult>, String> {
-        self.checkin_all_from(platforms, CheckinSource::Manual).await
+        self.checkin_all_from(platforms, CheckinSource::Manual)
+            .await
     }
 
     /// 批量签到；platforms 为 None 时签到全部平台，否则仅签到范围内的平台
@@ -564,6 +637,43 @@ impl CheckinService {
 
     // 签到批次互斥只约束签到自身的批量/补签路径；积分查询改用账号级互斥，
     // 并通过 batch_lock().is_active() 检测签到批量后主动让位。
+
+    /// Qoder CN 签到设备指纹：每账号独立、一次绑定永不轮换。
+    /// 与 TRAE 一样按「库里已存 → 账号档案里客户端真实值 → 按账号种子派生」三层补齐，
+    /// 但刻意不做 TRAE 9074 的换号重试：上游按设备身份建立信任分桶，换指纹会被分进
+    /// 不受信任的新桶，活动列表只会静默变空。多个账号档案里的 `machineid` 来自同一台
+    /// 机器，所以必须先与其它账号去重，不能照搬真实值造成串号。
+    fn qoder_machine_id(&self, acc: &Account) -> String {
+        let others: HashSet<String> = self
+            .db
+            .list_accounts()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|a| a.platform == "qoder_cn" && a.id != acc.id)
+            .map(|a| a.machine_id.trim().to_string())
+            .filter(|m| !m.is_empty())
+            .collect();
+        let current = acc.machine_id.trim();
+        if is_machine_id(current) && !others.contains(current) {
+            return current.to_string();
+        }
+        if let Some(real) =
+            crate::platform::qoder_cn::switch::vault_machine_id(&self.data_dir, &acc.id)
+        {
+            if is_machine_id(&real) && !others.contains(&real) {
+                let _ = self.db.update_account_machine_id(&acc.id, &real);
+                return real;
+            }
+        }
+        let seed = if acc.uid.trim().is_empty() {
+            acc.id.as_str()
+        } else {
+            acc.uid.trim()
+        };
+        let id = derived_machine_id(&format!("qoder-cn-fingerprint\0{}", seed));
+        let _ = self.db.update_account_machine_id(&acc.id, &id);
+        id
+    }
 
     /// TRAE 签到设备号：优先库里已存的固定号；缺失时才从账号 vault 的客户端真实号补齐，
     /// 再不行按账号种子派生。9074 后会把失败号轮换掉（见 trae_checkin）。
@@ -833,5 +943,323 @@ pub fn load_checkin_settings(db: &Database) -> CheckinSettings {
             cfg
         }
         None => CheckinSettings::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem_db() -> Arc<Database> {
+        Arc::new(Database::new(":memory:").expect("内存数据库初始化失败"))
+    }
+
+    fn account(id: &str) -> Account {
+        Account {
+            id: id.to_string(),
+            platform: "trae".to_string(),
+            name: id.to_string(),
+            ..Account::default()
+        }
+    }
+
+    fn service(db: Arc<Database>) -> CheckinService {
+        // 跳过/冷却分支都不会读取 vault，data_dir 用临时目录即可
+        CheckinService::new(db, std::env::temp_dir())
+    }
+
+    fn guard(lock: &Arc<CheckinBatchLock>, token: BatchToken) -> CheckinBatchGuard {
+        CheckinBatchGuard {
+            lock: lock.clone(),
+            token,
+        }
+    }
+
+    // ===== 批次锁：RAII 释放 / 互斥 / token 幂等 =====
+
+    #[test]
+    fn batch_lock_releases_on_guard_drop() {
+        let lock = Arc::new(CheckinBatchLock::new());
+        assert!(!lock.is_active());
+        let token = lock.try_acquire().expect("首次获取应成功");
+        let g = guard(&lock, token);
+        assert!(lock.is_active());
+        assert!(lock.held_for().is_some());
+        drop(g);
+        assert!(!lock.is_active(), "Drop 必须释放占用");
+        assert!(lock.held_for().is_none());
+    }
+
+    #[test]
+    fn batch_lock_is_exclusive() {
+        let lock = Arc::new(CheckinBatchLock::new());
+        let token = lock.try_acquire().unwrap();
+        let _g = guard(&lock, token);
+        assert!(lock.try_acquire().is_none(), "已有批次时不能重复进入");
+    }
+
+    #[test]
+    fn batch_lock_force_reclaim_invalidates_old_guard() {
+        let lock = Arc::new(CheckinBatchLock::new());
+        let t1 = lock.try_acquire().unwrap();
+        let g1 = guard(&lock, t1);
+        assert!(lock.force_reclaim().is_some(), "强制回收应返回被占用时长");
+
+        let t2 = lock.try_acquire().expect("回收后应可重新获取");
+        let g2 = guard(&lock, t2);
+        drop(g1);
+        assert!(
+            lock.is_active(),
+            "旧持有者的 Drop 因 token 不匹配必须失效，不能误释放新持有者"
+        );
+        drop(g2);
+        assert!(!lock.is_active());
+    }
+
+    #[test]
+    fn batch_lock_reclaim_when_idle_is_noop() {
+        let lock = CheckinBatchLock::new();
+        assert_eq!(lock.force_reclaim(), None);
+        let t = lock.try_acquire().unwrap();
+        lock.release(t);
+        lock.release(t); // 重复释放幂等
+        assert!(!lock.is_active());
+    }
+
+    // ===== 跳过判定纯函数 =====
+
+    #[test]
+    fn expired_only_when_expiry_known_and_past() {
+        let now = 1_700_000_000;
+        let mut acc = account("x");
+        assert!(!is_expired(&acc, now), "0 表示未知到期时间，不能判失效");
+        acc.token_expires_at = now - 1;
+        assert!(is_expired(&acc, now));
+        acc.token_expires_at = now + 1;
+        assert!(!is_expired(&acc, now));
+    }
+
+    #[test]
+    fn checked_in_today_uses_local_midnight() {
+        assert!(!checked_in_today(0), "从未签到必须返回 false");
+        assert!(checked_in_today(Utc::now().timestamp()));
+        assert!(!checked_in_today(Utc::now().timestamp() - 3 * 86400));
+    }
+
+    #[test]
+    fn platform_scope_maps_codebuddy_cn_to_workbuddy() {
+        let wb = vec!["workbuddy".to_string()];
+        let trae = vec!["trae".to_string()];
+        assert!(platform_in_scope("workbuddy", &wb));
+        assert!(platform_in_scope("codebuddy_cn", &wb));
+        assert!(!platform_in_scope("trae", &wb));
+        assert!(platform_in_scope("trae", &trae));
+        assert!(!platform_in_scope("codebuddy_cn", &trae));
+    }
+
+    #[test]
+    fn device_id_shape_and_derivation() {
+        assert!(is_aha_device("1234567890123456"));
+        assert!(!is_aha_device("12345"));
+        assert!(!is_aha_device("12345678901a2345"));
+        let a = derived_device_id("seed");
+        assert!(is_aha_device(&a));
+        assert_eq!(a, derived_device_id("seed"), "同一种子必须派生同一设备号");
+        assert_ne!(a, derived_device_id("other"), "换盐后应得到不同设备号");
+    }
+
+    #[test]
+    fn machine_id_shape_and_derivation() {
+        assert!(is_machine_id("24f8af00-2ef8-4fec-be9b-3c8e4dfbfccd"));
+        assert!(is_machine_id("0123456789abcdef0123456789abcdef"));
+        assert!(!is_machine_id("not-a-uuid"));
+        assert!(!is_machine_id(""));
+        let a = derived_machine_id("acc-a");
+        assert!(is_machine_id(&a));
+        assert_eq!(a, derived_machine_id("acc-a"), "同一账号指纹必须恒定");
+        assert_ne!(a, derived_machine_id("acc-b"), "不同账号不能撞桶");
+    }
+
+    fn qoder_account(id: &str, machine_id: &str) -> Account {
+        let mut acc = account(id);
+        acc.platform = "qoder_cn".to_string();
+        acc.machine_id = machine_id.to_string();
+        acc.access_token = "token".to_string();
+        acc
+    }
+
+    fn test_dir() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("am-qoder-fp-{}", Uuid::new_v4()))
+    }
+
+    fn write_vault_machine(dir: &std::path::Path, id: &str, machine_id: &str) {
+        let v = dir.join("vaults/qoder_cn").join(id);
+        std::fs::create_dir_all(v.join("User/globalStorage")).unwrap();
+        std::fs::write(v.join("meta.json"), b"{}").unwrap();
+        std::fs::write(v.join("User/globalStorage/state.vscdb"), b"").unwrap();
+        std::fs::write(v.join("machineid"), machine_id).unwrap();
+    }
+
+    #[test]
+    fn qoder_fingerprint_keeps_existing_and_isolates_accounts() {
+        let db = mem_db();
+        let dir = test_dir();
+        let existing = "24f8af00-2ef8-4fec-be9b-3c8e4dfbfccd";
+        db.insert_account(&qoder_account("a", existing)).unwrap();
+        db.insert_account(&qoder_account("b", "")).unwrap();
+        let svc = CheckinService::new(db.clone(), dir.clone());
+        let a = svc.qoder_machine_id(&db.get_account("a").unwrap().unwrap());
+        let b = svc.qoder_machine_id(&db.get_account("b").unwrap().unwrap());
+        assert_eq!(a, existing, "已绑定的指纹不得轮换");
+        assert!(is_machine_id(&b));
+        assert_ne!(a, b, "第二个账号必须落在独立分桶");
+        assert_eq!(
+            db.get_account("b").unwrap().unwrap().machine_id,
+            b,
+            "派生值必须落库复用"
+        );
+        assert_eq!(
+            svc.qoder_machine_id(&db.get_account("b").unwrap().unwrap()),
+            b
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn qoder_fingerprint_uses_vault_real_value_when_unique() {
+        let db = mem_db();
+        let dir = test_dir();
+        let real = "1bc85a44-3f03-48c3-bdd1-d4fa706f2d0a";
+        db.insert_account(&qoder_account("a", "")).unwrap();
+        write_vault_machine(&dir, "a", real);
+        let svc = CheckinService::new(db.clone(), dir.clone());
+        let got = svc.qoder_machine_id(&db.get_account("a").unwrap().unwrap());
+        assert_eq!(got, real, "客户端真实指纹优先于派生值");
+        assert_eq!(db.get_account("a").unwrap().unwrap().machine_id, real);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_campaign_marker_is_stripped_and_flagged() {
+        let marked = format!(
+            "{}该账号暂无每日积分活动",
+            crate::platform::qoder_cn::api::NO_CAMPAIGN_PREFIX
+        );
+        let (is_no_campaign, text) = split_no_campaign(marked);
+        assert!(is_no_campaign);
+        assert!(!text.contains("NO_CAMPAIGN"), "内部标记不能展示给用户");
+        assert!(text.contains("暂无每日积分活动"));
+
+        let (is_no_campaign, text) = split_no_campaign("登录态已失效，请重新授权".to_string());
+        assert!(!is_no_campaign, "普通失败不得被当成确定性无活动");
+        assert_eq!(text, "登录态已失效，请重新授权");
+    }
+
+    #[test]
+    fn qoder_fingerprint_rejects_shared_vault_value() {
+        let db = mem_db();
+        let dir = test_dir();
+        let real = "1bc85a44-3f03-48c3-bdd1-d4fa706f2d0a";
+        db.insert_account(&qoder_account("a", real)).unwrap();
+        db.insert_account(&qoder_account("b", "")).unwrap();
+        // 同一台机器两个档案里的 machineid 必然相同
+        write_vault_machine(&dir, "a", real);
+        write_vault_machine(&dir, "b", real);
+        let svc = CheckinService::new(db.clone(), dir.clone());
+        let b = svc.qoder_machine_id(&db.get_account("b").unwrap().unwrap());
+        assert_ne!(b, real, "共享的真实指纹必须被拒绝，否则两个账号串桶");
+        assert!(is_machine_id(&b));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_codebuddy_scope_is_migrated() {
+        let db = mem_db();
+        db.set_setting(
+            "checkin_settings",
+            r#"{"enabled":true,"hour":9,"minute":0,"cooldown_minutes":30,"max_fail_count":3,"interval_seconds":3,"platforms":["codebuddy_cn","trae"]}"#,
+        )
+        .unwrap();
+        let cfg = load_checkin_settings(&db);
+        assert_eq!(
+            cfg.platforms,
+            vec!["trae".to_string(), "workbuddy".to_string()]
+        );
+    }
+
+    // ===== checkin_one_from 的跳过 / 冷却分支 =====
+    // 这些分支都必须在发起任何上游请求前返回，且不落签到记录。
+
+    #[tokio::test]
+    async fn checkin_skips_expired_credentials() {
+        let db = mem_db();
+        let mut acc = account("expired");
+        acc.token_expires_at = Utc::now().timestamp() - 60;
+        db.insert_account(&acc).unwrap();
+        let r = service(db.clone())
+            .checkin_one_from(&acc.id, CheckinSource::Manual)
+            .await
+            .unwrap();
+        assert!(r.skipped);
+        assert!(!r.success);
+        assert!(r.message.contains("凭证已失效"));
+        assert_eq!(db.list_checkin_records(None, 50).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn checkin_respects_cooldown_without_skip() {
+        let db = mem_db();
+        let now = Utc::now().timestamp();
+        let mut acc = account("cooling");
+        acc.token_expires_at = now + 86400;
+        acc.cooldown_until = now + 3600;
+        db.insert_account(&acc).unwrap();
+        let r = service(db.clone())
+            .checkin_one_from(&acc.id, CheckinSource::Manual)
+            .await
+            .unwrap();
+        assert!(!r.skipped, "冷却是失败不是跳过，便于上层统计失败数");
+        assert!(!r.success);
+        assert!(r.message.contains("冷却中"));
+        assert_eq!(db.list_checkin_records(None, 50).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn checkin_skips_when_already_signed_today() {
+        let db = mem_db();
+        let now = Utc::now().timestamp();
+        let mut acc = account("signed");
+        acc.token_expires_at = now + 86400;
+        acc.last_checkin_time = now;
+        db.insert_account(&acc).unwrap();
+        let r = service(db.clone())
+            .checkin_one_from(&acc.id, CheckinSource::Manual)
+            .await
+            .unwrap();
+        assert!(r.skipped);
+        assert!(r.success, "今日已签是成功的跳过，不能记为失败");
+        assert!(r.message.contains("今日已签到"));
+        // 该分支会把状态规整为 success，避免界面残留 failed
+        let saved = db.get_account(&acc.id).unwrap().unwrap();
+        assert_eq!(saved.checkin_status, CheckinStatus::Success.as_str());
+        assert_eq!(db.list_checkin_records(None, 50).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn checkin_skips_workbuddy_ai_without_request() {
+        let db = mem_db();
+        let mut acc = account("intl");
+        acc.platform = "workbuddy".to_string();
+        acc.domain = "www.workbuddy.ai".to_string();
+        acc.token_expires_at = Utc::now().timestamp() + 86400;
+        db.insert_account(&acc).unwrap();
+        let r = service(db.clone())
+            .checkin_one_from(&acc.id, CheckinSource::Manual)
+            .await
+            .unwrap();
+        assert!(r.skipped);
+        assert!(!r.success);
+        assert!(r.message.contains("国际版"));
+        assert_eq!(db.list_checkin_records(None, 50).unwrap().len(), 0);
     }
 }

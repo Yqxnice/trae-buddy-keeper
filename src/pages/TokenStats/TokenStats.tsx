@@ -22,13 +22,14 @@ import { api, type TokenStatistics, type TokenStatsSource } from "@/lib/api";
 import { useUIStore } from "@/stores/ui";
 import "./TokenStats.css";
 
-type SourceKey = "workbuddy" | "workbuddy-ai" | "codebuddy-ide" | "trae";
+type SourceKey = "workbuddy" | "workbuddy-ai" | "codebuddy-ide" | "qoder-cn" | "trae";
 type RangeKey = "0" | "7" | "30" | "90";
 
 const SOURCE_LABELS: Record<SourceKey, string> = {
   workbuddy: "WorkBuddy",
   "workbuddy-ai": "WorkBuddy 国际版",
   "codebuddy-ide": "CodeBuddy IDE",
+  "qoder-cn": "Qoder CN",
   trae: "TRAE 云端",
 };
 
@@ -36,6 +37,7 @@ const EMPTY_TEXT: Record<SourceKey, string> = {
   workbuddy: "暂无 WorkBuddy 的本地日志数据",
   "workbuddy-ai": "暂无 WorkBuddy 国际版的本地日志数据",
   "codebuddy-ide": "暂无 CodeBuddy IDE 的本地日志数据",
+  "qoder-cn": "暂无 Qoder CN 的本地会话日志数据",
   trae: "暂无 TRAE 云端用量数据",
 };
 
@@ -179,12 +181,14 @@ export function TokenStatsPage() {
   const [source, setSource] = useState<SourceKey>("workbuddy");
   const [range, setRange] = useState<RangeKey>("0");
 
-  /** 平台↔数据源隔离：TRAE 只看云端用量，WorkBuddy / CodeBuddy 只看本地日志 */
+  /** 平台↔数据源隔离：TRAE 只看云端用量，Qoder CN 只看自身会话日志 */
   const sourceKeys = useMemo<SourceKey[]>(
     () =>
       platform === "trae"
         ? ["trae"]
-        : ["workbuddy", "workbuddy-ai", "codebuddy-ide"],
+        : platform === "qoder_cn"
+          ? ["qoder-cn"]
+          : ["workbuddy", "workbuddy-ai", "codebuddy-ide"],
     [platform],
   );
 
@@ -276,7 +280,9 @@ export function TokenStatsPage() {
         sub={
           platform === "trae"
             ? "同步 TRAE 云端会话用量（最多回溯 90 天），仅本机展示"
-            : "扫描本地日志聚合，数据不上传；国内版与国际版独立统计"
+            : platform === "qoder_cn"
+              ? "扫描 Qoder CN 本地会话日志聚合，数据不上传"
+              : "扫描本地日志聚合，数据不上传；国内版与国际版独立统计"
         }
         right={
           <Button onClick={() => load(range, true)} disabled={refreshing}>

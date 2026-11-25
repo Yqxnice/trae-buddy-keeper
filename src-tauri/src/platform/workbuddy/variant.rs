@@ -3,7 +3,7 @@
 //! 档位差异（API 域名、认证文件名、OAuth platform、能力声明）只允许从这里取，
 //! 其它模块不得再出现档位相关字面量。缺省档位为 `Cn`，历史数据零迁移：
 //! 账号档位由落库的 `domain` 后缀判定（`.workbuddy.ai` = 国际版）。
-//! 实现参考了开源项目 workbuddy-switch 的 variant.rs。
+//! 国内 / 国际档位判定与接口基址。
 
 use crate::data::models::Account;
 

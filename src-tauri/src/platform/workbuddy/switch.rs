@@ -1,6 +1,6 @@
 //! WorkBuddy 客户端账号切换：备份 → 关进程 → 写认证文件 → 删退出标记 → 启动。
 //!
-//! 实现参考了开源项目 workbuddy-switch、TraeTools。
+//! WorkBuddy 客户端登录态注入与进程管理。
 //!
 //! 官方登录态集中在单个 JSON 认证文件（四段：account/auth/accounts/allAccounts），
 //! 切换 = 原子写入目标账号凭据 + 写后校验 + 清理 `<file>.logged-out` 退出标记
@@ -14,11 +14,11 @@ use crate::data::models::Account;
 
 /// CodeBuddy 国内版产品域（账号 domain 缺失时的兜底）
 const DOMAIN: &str = "www.codebuddy.cn";
-/// 关闭进程总预算：先优雅 12s，再强杀 8s（对齐参考实现的三级关闭口径）
+/// 关闭进程总预算：先优雅 12s，再强杀 8s
 const GRACEFUL_WAIT_SECS: u64 = 12;
 const FORCE_WAIT_SECS: u64 = 8;
 
-/// 官方认证文件路径（三平台口径与参考实现一致；国内/国际同目录不同文件）
+/// 官方认证文件路径（国内/国际同目录不同文件）
 pub fn auth_file_path(variant: WbVariant) -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or("无法定位用户主目录")?;
     #[cfg(target_os = "windows")]
@@ -56,7 +56,7 @@ fn backup_auth_file(auth_path: &Path) -> Option<PathBuf> {
     Some(dest)
 }
 
-/// 从账号构造官方 account 字段（缺省值与参考实现对齐）
+/// 从账号构造官方 account 字段
 fn build_account_obj(acc: &Account) -> Value {
     let mut obj = Map::new();
     obj.insert("uid".to_string(), json!(acc.uid));

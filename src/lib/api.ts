@@ -29,6 +29,16 @@ export interface AccountInfo {
   clients?: string[];
 }
 
+/** 账号档案元数据：verify_failed_at 非空表示最近一次切换未确认登录身份 */
+export interface VaultInfo {
+  created_at: number;
+  entries: number;
+  verify_failed_at: number | null;
+}
+
+/** 兼容既有引用 */
+export type TraeVaultInfo = VaultInfo;
+
 export interface CreditResult {
   account_id: string;
   account_name: string;
@@ -142,16 +152,9 @@ export const api = {
     refresh_token: string;
     cookies: string;
   }) => invoke<void>("update_account", p),
-  addAccountManual: (p: {
-    platform: string;
-    name: string;
-    email: string;
-    access_token: string;
-    refresh_token: string;
-    cookies: string;
-  }) => invoke<string>("add_account_manual", p),
-  addAccountImport: (json: string) => invoke<string>("add_account_import", { json }),
-  deleteAccount: (id: string) => invoke<void>("delete_account", { id }),
+  /** keepVaultBackup：删除账户时把客户端登录档案轮转为 .bak 保留，而不是彻底删除 */
+  deleteAccount: (id: string, keepVaultBackup: boolean) =>
+    invoke<string>("delete_account", { id, keepVaultBackup }),
   checkinOne: (id: string) => invoke<CheckinResult>("checkin_one", { id }),
   /** source 仅用于后端日志标注触发来源：托盘传 "tray"，界面按钮不传 */
   checkinAll: (platform?: string, source?: "tray" | "scheduled" | "catchup") =>
@@ -170,7 +173,9 @@ export const api = {
     invoke<void>("set_credit_schedule", { settings: s }),
   getNotificationMode: () => invoke<string>("get_notification_mode"),
   setNotificationMode: (mode: string) => invoke<void>("set_notification_mode", { mode }),
+  /** 手动续期单个账号：不受 24h 到期窗口限制，仅有单账号 5 分钟限频 */
   renewToken: (id: string) => invoke<string>("renew_token", { id }),
+  /** 手动批量续期全部账号：不走自动巡检的 24h 窗口；返回逐账号「续期成功 / 续期失败」结果 */
   autoRenewAll: () => invoke<string[]>("auto_renew_all"),
   startTraeOauth: () => invoke<string>("start_trae_oauth"),
   stopTraeOauth: () => invoke<void>("stop_trae_oauth"),
@@ -180,6 +185,12 @@ export const api = {
     invoke<{ state: string; authUrl: string }>("start_workbuddy_login", { variant }),
   pollWorkbuddyLogin: (loginState: string, variant: WbVariant = "cn") =>
     invoke<{ status: string; name: string }>("poll_workbuddy_login", { loginState, variant }),
+  startQoderLogin: (compat = false) =>
+    invoke<{ state: string; authUrl: string }>("start_qoder_login", { compat }),
+  stopQoderLogin: (loginState: string) =>
+    invoke<void>("stop_qoder_login", { loginState }),
+  pollQoderLogin: (loginState: string) =>
+    invoke<{ status: string; name: string }>("poll_qoder_login", { loginState }),
   switchAccount: (id: string) => invoke<string>("switch_account", { id }),
   switchWorkbuddyClient: (id: string) =>
     invoke<string>("switch_workbuddy_client", { id }),
@@ -191,7 +202,14 @@ export const api = {
   backupTraeVault: (id: string, closeRunning = false) =>
     invoke<string>("backup_trae_vault", { id, closeRunning }),
   traeVaultInfo: (id: string) =>
-    invoke<[number, number] | null>("trae_vault_info", { id }),
+    invoke<TraeVaultInfo | null>("trae_vault_info", { id }),
+  switchQoderClient: (id: string) => invoke<string>("switch_qoder_client", { id }),
+  qoderClientRunning: () => invoke<boolean>("qoder_client_running"),
+  backupQoderVault: (id: string, closeRunning = false) =>
+    invoke<string>("backup_qoder_vault", { id, closeRunning }),
+  qoderVaultInfo: (id: string) =>
+    invoke<VaultInfo | null>("qoder_vault_info", { id }),
+  restoreQoderLast: () => invoke<string>("restore_qoder_last"),
   refreshCredits: (id: string) => invoke<CreditResult>("refresh_credits", { id }),
   refreshAllCredits: (platform?: string) =>
     invoke<CreditResult[]>("refresh_all_credits", { platform: platform ?? null }),
@@ -225,6 +243,7 @@ export interface AppSettings {
   client_path_workbuddy: string;
   client_path_workbuddy_ai: string;
   client_path_codebuddy_cn: string;
+  client_path_qoder_cn: string;
 }
 
 export interface ClientPaths {
@@ -232,6 +251,7 @@ export interface ClientPaths {
   workbuddy: string;
   workbuddy_ai: string;
   codebuddy_cn: string;
+  qoder_cn: string;
 }
 
 /** WorkBuddy 档位：国内版 cn / 国际版 ai */

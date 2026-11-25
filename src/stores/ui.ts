@@ -6,7 +6,7 @@ import type { ToastItem, ToastType } from "@/components/Toast/Toast";
  * 页面直接订阅 store，无需 App 逐层透传 props。
  */
 interface UIStore {
-  /** 当前产品（trae / workbuddy），Titlebar 写、各页面读 */
+  /** 当前产品（trae / workbuddy / qoder_cn），Titlebar 写、各页面读 */
   platform: string;
   setPlatform: (p: string) => void;
   /** 右上角通知堆栈 */

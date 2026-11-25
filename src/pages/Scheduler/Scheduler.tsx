@@ -23,7 +23,7 @@ const CREDIT_INTERVAL_OPTIONS = [
 ];
 
 /** 积分查询可选的平台范围（WorkBuddy 范围含 CodeBuddy CN） */
-const CREDIT_SCOPE_KEYS = ["trae", "workbuddy"] as const;
+const CREDIT_SCOPE_KEYS = ["trae", "workbuddy", "qoder_cn"] as const;
 
 export function SchedulerPage() {
   const pushToast = useUIStore((s) => s.pushToast);

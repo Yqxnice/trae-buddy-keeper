@@ -39,7 +39,8 @@ pub struct Account {
     /// TRAE 设备密钥（P-256 私钥的 32 字节 hex）：换证时用它签 DeviceProof，
     /// 签出的 JWT 才与设备绑定；未绑定设备的 JWT 会被签到接口判 9074
     pub device_key: String,
-    /// TRAE 登录时的机器码（换证 DeviceInfo.MachineID 用）
+    /// 账号绑定的机器码：TRAE 换证 DeviceInfo.MachineID 用；Qoder CN 作为
+    /// `Cosy-MachineId` 设备指纹，每账号独立、一次绑定不轮换。
     pub machine_id: String,
     pub avatar: String,
     pub access_token: String,
@@ -218,6 +219,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub client_path_workbuddy_ai: String,
     pub client_path_codebuddy_cn: String,
+    #[serde(default)]
+    pub client_path_qoder_cn: String,
 }
 
 impl Default for AppSettings {
@@ -230,6 +233,7 @@ impl Default for AppSettings {
             client_path_workbuddy: String::new(),
             client_path_workbuddy_ai: String::new(),
             client_path_codebuddy_cn: String::new(),
+            client_path_qoder_cn: String::new(),
         }
     }
 }

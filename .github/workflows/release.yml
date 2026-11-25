@@ -31,10 +31,16 @@ jobs:
           if [ -n "$PREV" ]; then RANGE="$PREV..${GITHUB_REF_NAME}"; fi
           {
             echo "body<<NOTES_EOF"
-            echo "## 本版变更"
-            echo
-            git log --reverse --pretty=format:"- %s (%h)" "$RANGE"
-            echo
+            # 有手写发布说明时优先使用；否则按提交记录生成
+            if [ -s RELEASE_NOTES.md ]; then
+              cat RELEASE_NOTES.md
+              echo
+            else
+              echo "## 本版变更"
+              echo
+              git log --reverse --pretty=format:"- %s (%h)" "$RANGE"
+              echo
+            fi
             echo
             echo "请下载对应安装包，已安装旧版的用户也会通过应用内自动更新收到本次升级。"
             echo "NOTES_EOF"
